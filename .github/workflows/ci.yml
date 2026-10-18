@@ -60,9 +60,88 @@ jobs:
           push: false
           cache-from: type=gha
 
-  # NOT ADDED YET, deliberately: LedgerApi's and IdentityApi's ci.yml both have a `deploy` job (Azure App
-  # Service, triggered only on a push to main). This service has no App Service, database server or
-  # federated credential set up yet - inventing placeholder resource names the way IdentityApi's task did
-  # would just be unused scaffolding with no real target. The task file asks only for `test`/`docker`
-  # green on this branch; adding `deploy` is left for whenever this service is actually deployed, flagged
-  # in the PR description rather than built speculatively here.
+  # Wired up 18 Oct 2026: shares LedgerApi's App Service Plan (ASP-ledgerrg-8f31) and Postgres Flexible
+  # Server (ledgerapi-db-san) to avoid a second Plan's/server's cost - OrchestratorApi still gets its own
+  # App Service and its own database, just not its own dedicated infrastructure. Same managed identity
+  # (ledgerapi-id-b111) as the other two services, with its own federated credential scoped to this
+  # repo's main branch and a Website Contributor role assignment scoped to garbati-orchestratorapi only.
+  deploy:
+    needs: [test, docker]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # lets azure/login exchange GitHub's OIDC token: no Azure password is stored anywhere
+      contents: read
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false # never stop a deploy halfway
+    env:
+      RESOURCE_GROUP: ledger-rg # shared with LedgerApi's App Service Plan and Postgres server
+      APP_NAME: garbati-orchestratorapi
+      DB_SERVER: ledgerapi-db-san # shared server; OrchestratorApi has its own database on it, not its own server
+      APP_URL: https://garbati-orchestratorapi.azurewebsites.net
+      FIREWALL_RULE: github-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # Publish the API project only: publishing the solution also ships the test project.
+      - name: Publish the API
+        run: |
+          dotnet publish src/Garbati.OrchestratorApi/Garbati.OrchestratorApi.csproj -c Release -o publish
+          rm -f publish/appsettings.Development.json
+          (cd publish && zip -qr ../app.zip .)
+
+      - name: Build the migration bundle
+        run: |
+          dotnet tool restore
+          dotnet ef migrations bundle --project src/Garbati.OrchestratorApi --configuration Release --output efbundle
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_ORCHESTRATORAPI }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_ORCHESTRATORAPI }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_ORCHESTRATORAPI }}
+
+      # The App Service setting is the single source of truth: the connection string is not copied into GitHub.
+      - name: Read the connection string from App Service
+        run: |
+          cs=$(az webapp config connection-string list -g "$RESOURCE_GROUP" -n "$APP_NAME" --query "[?name=='OrchestratorDb'].value | [0]" -o tsv)
+          if [ -z "$cs" ]; then echo "::error::App Service has no OrchestratorDb connection string"; exit 1; fi
+          echo "::add-mask::$cs"
+          echo "ORCHESTRATORDB=$cs" >> "$GITHUB_ENV"
+
+      - name: Allow this runner through the database firewall
+        run: |
+          ip=$(curl -fsS https://api.ipify.org)
+          az postgres flexible-server firewall-rule create -g "$RESOURCE_GROUP" --server-name "$DB_SERVER" \
+            --name "$FIREWALL_RULE" --start-ip-address "$ip" --end-ip-address "$ip" -o none
+
+      - name: Apply migrations
+        run: ./efbundle --connection "$ORCHESTRATORDB"
+
+      # Runs even when an earlier step failed, so the runner's IP never stays allowed.
+      - name: Remove the runner's firewall rule
+        if: always()
+        run: |
+          az postgres flexible-server firewall-rule delete -g "$RESOURCE_GROUP" --server-name "$DB_SERVER" \
+            --name "$FIREWALL_RULE" --yes -o none || true
+
+      # --clean empties wwwroot first, so files from older deployments cannot linger.
+      - name: Deploy to App Service
+        run: az webapp deploy -g "$RESOURCE_GROUP" -n "$APP_NAME" --src-path app.zip --type zip --clean true
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 30); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' "$APP_URL/health/ready")" = "200" ] && break
+            sleep 10
+          done
+          ready=$(curl -s -o /dev/null -w '%{http_code}' "$APP_URL/health/ready")
+          unauthenticated=$(curl -s -o /dev/null -w '%{http_code}' "$APP_URL/v1/account-openings/OP-SMOKETEST")
+          echo "/health/ready: $ready, request without a key: $unauthenticated"
+          [ "$ready" = "200" ] || { echo "::error::/health/ready did not return 200"; exit 1; }
+          [ "$unauthenticated" = "401" ] || { echo "::error::the API did not reject a request without a key"; exit 1; }
