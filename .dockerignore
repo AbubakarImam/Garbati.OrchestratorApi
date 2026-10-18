@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+.git
+.github
+.vs
+.vscode
+.idea
+tests/
+docs/
+*.md
+src/Garbati.OrchestratorApi/appsettings.Development.json

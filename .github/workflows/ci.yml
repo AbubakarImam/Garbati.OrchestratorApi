@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # "Run workflow" button: redeploy main without a new commit
+
+permissions:
+  contents: read
+
+# A new push to the same branch or PR cancels the run still in progress.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - run: dotnet restore
+      - run: dotnet build --no-restore -c Release
+
+      # Testcontainers starts Postgres in Docker, which GitHub's Ubuntu runners provide.
+      - run: dotnet test --no-build -c Release --logger trx --results-directory TestResults
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: TestResults
+
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: final
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build migrator image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: migrator
+          push: false
+          cache-from: type=gha
+
+  # NOT ADDED YET, deliberately: LedgerApi's and IdentityApi's ci.yml both have a `deploy` job (Azure App
+  # Service, triggered only on a push to main). This service has no App Service, database server or
+  # federated credential set up yet - inventing placeholder resource names the way IdentityApi's task did
+  # would just be unused scaffolding with no real target. The task file asks only for `test`/`docker`
+  # green on this branch; adding `deploy` is left for whenever this service is actually deployed, flagged
+  # in the PR description rather than built speculatively here.
