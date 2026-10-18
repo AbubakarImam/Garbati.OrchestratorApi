@@ -1,0 +1,36 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{9EB2FD55-8FF7-4574-96CE-4ACDA65A3C47}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Garbati.OrchestratorApi", "src\Garbati.OrchestratorApi\Garbati.OrchestratorApi.csproj", "{5059DC41-8C11-46B5-8A08-7FA37D7B5E22}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{8946740D-4BBA-42EF-86BA-753D9CC4F046}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Garbati.OrchestratorApi.Tests", "tests\Garbati.OrchestratorApi.Tests\Garbati.OrchestratorApi.Tests.csproj", "{2C5F66D2-9929-4AE9-94CE-382D9F96F6B3}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{5059DC41-8C11-46B5-8A08-7FA37D7B5E22}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5059DC41-8C11-46B5-8A08-7FA37D7B5E22}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5059DC41-8C11-46B5-8A08-7FA37D7B5E22}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5059DC41-8C11-46B5-8A08-7FA37D7B5E22}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2C5F66D2-9929-4AE9-94CE-382D9F96F6B3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2C5F66D2-9929-4AE9-94CE-382D9F96F6B3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2C5F66D2-9929-4AE9-94CE-382D9F96F6B3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2C5F66D2-9929-4AE9-94CE-382D9F96F6B3}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{5059DC41-8C11-46B5-8A08-7FA37D7B5E22} = {9EB2FD55-8FF7-4574-96CE-4ACDA65A3C47}
+		{2C5F66D2-9929-4AE9-94CE-382D9F96F6B3} = {8946740D-4BBA-42EF-86BA-753D9CC4F046}
+	EndGlobalSection
+EndGlobal
