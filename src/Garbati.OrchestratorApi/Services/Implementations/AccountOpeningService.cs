@@ -34,11 +34,17 @@ public class AccountOpeningService(
     // Orchestrator, it is the one decided way v1 satisfies IdentityApi's own KYC-verification requirement
     // before a mandate/authorization check will treat the customer as eligible at all.
     //
-    // KycTier "Tier1" assumes the target jurisdiction has a Tier1 KycTierPolicy row seeded on the
-    // IdentityApi side (true for "NG" in its current seed migration) - a real deployment would need a
-    // real tier decision per jurisdiction, which is exactly what a real KYC provider would supply instead
-    // of this stub.
-    private const string DemoKycTier = "Tier1";
+    // KycTier "Tier2" (T-025 - was "Tier1" until IdentityApi's placeholder KycTierPolicy seed data showed
+    // that was wrong). IdentityApi's "NG" seed migration only lists "View" for Tier1, so an account opened
+    // at Tier1 can never pass MandateEligibility's Debit/Credit check - and T-022's own demo scope is
+    // explicitly "account opening, plain transfer", which needs Debit to work. Tier2 lists
+    // View/Credit/Debit, so this is the lowest tier that actually supports the demo path it exists for.
+    // Still a hardcoded, clearly-labeled demo stub decision, not a real KYC-tier policy choice - a real
+    // deployment would need a real tier decision per customer/jurisdiction, which is exactly what a real
+    // KYC provider would supply instead of this stub. (Also still assumes the target jurisdiction has a
+    // Tier2 KycTierPolicy row seeded on the IdentityApi side - true for "NG" in its current seed
+    // migration, not guaranteed for an arbitrary JurisdictionCode a caller supplies.)
+    private const string DemoKycTier = "Tier2";
     private const string DemoKycVerificationType = "DemoStub";
     private const string DemoKycProvider = "OrchestratorDemoStub-NotRealVerification";
 
