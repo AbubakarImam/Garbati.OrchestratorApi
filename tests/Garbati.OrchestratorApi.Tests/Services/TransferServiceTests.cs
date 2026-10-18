@@ -73,6 +73,40 @@ public class TransferServiceTests(PostgresFixture fixture) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task TransferAsync_SendsDebitAsTheOperationToIdentityApi()
+    {
+        // T-024 regression test: the existing tests above mock IIdentityApiClient but never inspected the
+        // Operation string actually sent in the AuthorizationRequest - that gap is exactly how a literal
+        // "Transfer" (invalid; IdentityApi's AuthorizationRequestValidator only accepts MandateOperation
+        // values View/Debit/Credit, or the literal "Reversal") shipped and made every live transfer call
+        // fail with a 400 from IdentityApi, surfaced as an opaque 500 by this service. Capture the actual
+        // request via the fake's handler and assert on its Operation field, not just that it was called.
+        Garbati.OrchestratorApi.Clients.Contracts.Identity.AuthorizationRequest? capturedRequest = null;
+        var identity = new FakeIdentityApiClient
+        {
+            RequestAuthorizationHandler = r =>
+            {
+                capturedRequest = r;
+                return new Garbati.OrchestratorApi.Clients.Contracts.Identity.AuthorizationResponse(
+                    new Garbati.OrchestratorApi.Clients.Contracts.Identity.AuthorizationDecisionResponse(
+                        "DEC-FAKE0000000001", true, null, r.RequestedBy, r.Operation,
+                        r.DebitAccountId, r.CreditAccountId, r.Amount.ToString("F2"), r.Currency,
+                        "MND-FAKE0000000001", DateTimeOffset.UtcNow),
+                    "fake.grant.token",
+                    DateTimeOffset.UtcNow.AddSeconds(30));
+            },
+        };
+        var ledger = new FakeLedgerApiClient();
+        await using var ctx = fixture.CreateContext();
+        var service = CreateService(ctx, identity, ledger);
+
+        await service.TransferAsync(NewRequest());
+
+        Assert.NotNull(capturedRequest);
+        Assert.Equal("Debit", capturedRequest!.Operation);
+    }
+
+    [Fact]
     public async Task TransferAsync_WhenLedgerApiReportsAFailedLeg_ReturnsTheFailureReason()
     {
         await using var ctx = fixture.CreateContext();

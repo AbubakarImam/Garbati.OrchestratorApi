@@ -30,9 +30,14 @@ public class TransferService(
         {
             // DESIGN.md 1.6: RequestedBy is the caller-supplied, unauthenticated-behind-it CustomerId -
             // passed straight through, never treated as a verified identity by this service.
+            // "Debit", not "Transfer": IdentityApi's AuthorizationRequestValidator only accepts
+            // MandateOperation values (View/Debit/Credit) or the literal "Reversal" - a transfer is, from
+            // IdentityApi's point of view, exactly "may this requester debit this account for this
+            // amount?" (DESIGN.md Section 2.2's mandate-permission vocabulary). "Transfer" is not a
+            // recognized Operation and was rejected with a 400 on every live call (T-024).
             authorization = await identityApiClient.RequestAuthorizationAsync(
                 new IdentityDto.AuthorizationRequest(
-                    request.RequestedBy, "Transfer", request.DebitAccountId, request.CreditAccountId,
+                    request.RequestedBy, "Debit", request.DebitAccountId, request.CreditAccountId,
                     request.Amount, request.Currency, request.IdempotencyKey),
                 cancellationToken);
         }
