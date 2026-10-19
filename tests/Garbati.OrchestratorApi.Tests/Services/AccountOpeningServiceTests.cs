@@ -1,3 +1,4 @@
+using Garbati.OrchestratorApi.Clients.Contracts.Identity;
 using Garbati.OrchestratorApi.Contracts.Requests;
 using Garbati.OrchestratorApi.Data;
 using Garbati.OrchestratorApi.Exceptions;
@@ -46,6 +47,34 @@ public class AccountOpeningServiceTests(PostgresFixture fixture) : IAsyncLifetim
         Assert.Equal(1, identity.RecordKycDecisionCallCount);
         Assert.Equal(1, ledger.CreateAccountCallCount);
         Assert.Equal(1, identity.AttachMandateCallCount);
+    }
+
+    // T-025 regression: the demo KYC stub must assign a tier that IdentityApi's own tier-policy data
+    // actually allows Debit/Credit for, or no demo-opened account can ever pass a transfer's authorization
+    // check (confirmed live: a Tier1 demo account's transfer attempt came back denied with IdentityApi's
+    // real OperationNotEligibleForKycTier reason, since IdentityApi's "NG" seed data lists Tier1 as
+    // View-only). This asserts the actual captured request value, not just that the call happened - the
+    // same gap (mock invoked, nobody checked what was sent) is exactly what let the Tier1 mismatch ship.
+    [Fact]
+    public async Task StartAsync_RecordsKycDecision_WithATierThatAllowsDebitAndCredit()
+    {
+        KycDecisionRequest? captured = null;
+        var identity = new FakeIdentityApiClient
+        {
+            RecordKycDecisionHandler = (id, r) =>
+            {
+                captured = r;
+                return new CustomerResponse(id, null, "Active", r.KycStatus, r.KycTier, "NG", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+            },
+        };
+        var ledger = new FakeLedgerApiClient();
+        await using var ctx = fixture.CreateContext();
+        var service = CreateService(ctx, identity, ledger);
+
+        await service.StartAsync(NewRequest(Guid.NewGuid().ToString()));
+
+        Assert.NotNull(captured);
+        Assert.Equal("Tier2", captured!.KycTier);
     }
 
     [Fact]
