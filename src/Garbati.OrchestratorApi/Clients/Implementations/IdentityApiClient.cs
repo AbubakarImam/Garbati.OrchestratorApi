@@ -67,6 +67,20 @@ public class IdentityApiClient(HttpClient httpClient) : IIdentityApiClient
             response, "IdentityApi POST /v1/authorization/requests", cancellationToken);
     }
 
+    // T-030/DESIGN.md Section 8.6 on IdentityApi's side: reports the real LedgerApi outcome back, already
+    // built there (identity.ops.reversal policy - same scope the authorization-request call above needs).
+    // No special status handling here: unlike RequestAuthorizationAsync's 422-means-denied case, a bad
+    // Outcome value is rejected with a plain 400 by IdentityApi's own RecordReversalOutcomeRequestValidator,
+    // which this service's own ReversalOutcomeKind-shaped literals ("Completed"/"WriteOff") never trigger.
+    public async Task<ReversalOutcomeResponse> RecordReversalOutcomeAsync(
+        string decisionId, RecordReversalOutcomeRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync(
+            $"v1/authorization/requests/{decisionId}/reversal-outcome", request, cancellationToken);
+        return await ReadOrThrowAsync<ReversalOutcomeResponse>(
+            response, $"IdentityApi POST /v1/authorization/requests/{decisionId}/reversal-outcome", cancellationToken);
+    }
+
     private static async Task<T> ReadOrThrowAsync<T>(HttpResponseMessage response, string what, CancellationToken cancellationToken)
     {
         if (response.IsSuccessStatusCode)

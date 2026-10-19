@@ -10,12 +10,16 @@ namespace Garbati.OrchestratorApi.Authorization;
 // transfer - rather than a single scope covering both: a demo driver wiring up only transfers (say,
 // against accounts opened some other way) should not also need account-opening rights, and vice versa.
 // See the PR description for the full reasoning.
+//
+// T-030 adds Reversals, following the exact same one-scope-per-operation-group convention: a demo driver
+// wiring up transfers should not also be able to reverse them, and vice versa.
 public static class OrchestratorScopes
 {
     public const string ClaimType = "scope";
 
     public const string AccountOpenings = "orchestrator.account-openings";
     public const string Transfers = "orchestrator.transfers";
+    public const string Reversals = "orchestrator.reversals";
 
-    public static readonly IReadOnlyList<string> All = [AccountOpenings, Transfers];
+    public static readonly IReadOnlyList<string> All = [AccountOpenings, Transfers, Reversals];
 }

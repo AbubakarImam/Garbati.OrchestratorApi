@@ -34,6 +34,17 @@ public class LedgerApiClient(HttpClient httpClient) : ILedgerApiClient
             $"LedgerApi POST /api/transfers: {DownstreamResponseReader.DescribeFailure(problem, response)}");
     }
 
+    // T-030: unlike TransferAsync above, LedgerApi's reversal failure path (insufficient funds, already
+    // reversed, not found, ...) always throws before any response body exists (confirmed against its live
+    // ReversalService/ExceptionHandlingMiddleware - no stored "Failed" row, decision #27 on its side) - so
+    // there is no dual "200 or 422-with-body" case to special-case here. Any non-success response is
+    // surfaced as DownstreamApiException, exactly like CreateAccountAsync above.
+    public async Task<ReversalResponse> ReverseAsync(ReversalRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("api/reversals", request, cancellationToken);
+        return await ReadOrThrowAsync<ReversalResponse>(response, "LedgerApi POST /api/reversals", cancellationToken);
+    }
+
     private static async Task<T> ReadOrThrowAsync<T>(HttpResponseMessage response, string what, CancellationToken cancellationToken)
     {
         if (response.IsSuccessStatusCode)

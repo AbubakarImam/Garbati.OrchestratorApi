@@ -20,6 +20,10 @@ public class AuthorizationTests(ApiFixture fixture)
         {"idempotencyKey":"auth-test-transfer","requestedBy":"CUS-DOESNOTEXIST","debitAccountId":"1000000001",
          "creditAccountId":"1000000002","amount":100,"currency":"NGN"}
         """;
+    private static string ReversalBody() => """
+        {"idempotencyKey":"auth-test-reversal","requestedBy":"CUS-DOESNOTEXIST","originalTransactionReference":"TXN-DOESNOTEXIST",
+         "amount":100,"currency":"NGN","reasonCode":"CUST"}
+        """;
 
     public static TheoryData<string, string, string?, string> Endpoints => new()
     {
@@ -27,6 +31,7 @@ public class AuthorizationTests(ApiFixture fixture)
         { "GET", "/v1/account-openings/OPN-DOESNOTEXIST", null, OrchestratorScopes.AccountOpenings },
         { "POST", "/v1/account-openings/OPN-DOESNOTEXIST/retry", null, OrchestratorScopes.AccountOpenings },
         { "POST", "/v1/transfers", TransferBody(), OrchestratorScopes.Transfers },
+        { "POST", "/v1/reversals", ReversalBody(), OrchestratorScopes.Reversals },
     };
 
     private static HttpRequestMessage Request(string method, string path, string? body)
