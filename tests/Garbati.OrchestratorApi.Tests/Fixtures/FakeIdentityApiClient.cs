@@ -14,11 +14,13 @@ public class FakeIdentityApiClient : IIdentityApiClient
     public int RecordKycDecisionCallCount { get; private set; }
     public int AttachMandateCallCount { get; private set; }
     public int RequestAuthorizationCallCount { get; private set; }
+    public int RecordReversalOutcomeCallCount { get; private set; }
 
     public Func<CreateCustomerRequest, CustomerResponse>? CreateCustomerHandler { get; set; }
     public Func<string, KycDecisionRequest, CustomerResponse>? RecordKycDecisionHandler { get; set; }
     public Func<string, AttachMandateRequest, MandateResponse>? AttachMandateHandler { get; set; }
     public Func<AuthorizationRequest, AuthorizationResponse>? RequestAuthorizationHandler { get; set; }
+    public Func<string, RecordReversalOutcomeRequest, ReversalOutcomeResponse>? RecordReversalOutcomeHandler { get; set; }
 
     public Task<CustomerResponse> CreateCustomerAsync(CreateCustomerRequest request, CancellationToken cancellationToken)
     {
@@ -56,5 +58,14 @@ public class FakeIdentityApiClient : IIdentityApiClient
             "fake.grant.token",
             DateTimeOffset.UtcNow.AddSeconds(30)));
         return Task.FromResult(handler(request));
+    }
+
+    public Task<ReversalOutcomeResponse> RecordReversalOutcomeAsync(
+        string decisionId, RecordReversalOutcomeRequest request, CancellationToken cancellationToken)
+    {
+        RecordReversalOutcomeCallCount++;
+        var handler = RecordReversalOutcomeHandler ?? ((id, r) => new ReversalOutcomeResponse(
+            id, r.Outcome, DateTimeOffset.UtcNow, r.RecordedBy, r.Notes));
+        return Task.FromResult(handler(decisionId, request));
     }
 }
