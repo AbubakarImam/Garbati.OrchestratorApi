@@ -93,23 +93,87 @@ public class ReversalService(
             failureReason = null;
             outcome = "Completed";
         }
-        catch (DownstreamApiException ex) when (ex.StatusCode == StatusCodes.Status422UnprocessableEntity)
+        catch (DownstreamApiException ex) when (
+            ex.StatusCode is StatusCodes.Status404NotFound or StatusCodes.Status422UnprocessableEntity)
         {
             // LedgerApi's reversal call throws rather than returning a Status="Failed" body the way
-            // TransferAsync does (see ReverseAsync's own comment): a 422 here is LedgerApi rejecting the
-            // reversal on a business rule (insufficient funds on the account being reversed from is the
-            // task's own example; "already reversed"/"not found" are different, non-business-rule cases
-            // and are deliberately NOT caught here - they propagate like any other unexpected failure).
-            // This is exactly the "money not recovered" case WriteOff exists for (decision #34,
-            // reconfirmed by T-021) - not a third state to invent.
+            // TransferAsync does (see ReverseAsync's own comment). Both 404 (bad OriginalTransactionReference
+            // - nothing to reverse) and 422 (a business rule, e.g. insufficient funds on the account being
+            // reversed from) mean the reversal was validly attempted against this decision but could not
+            // happen - exactly the "money not recovered" case WriteOff exists for (decision #34,
+            // reconfirmed by T-021) - not a third state to invent. QA (PR #4) found the original code only
+            // caught 422; 404 belongs in the same bucket, not the unconfirmed one below, since LedgerApi
+            // has definitively told us this reversal did not happen.
             reference = request.OriginalTransactionReference;
             status = "Failed";
             failureReason = ex.Message;
             outcome = "WriteOff";
         }
+        catch (DownstreamApiException ex) when (ex.StatusCode == StatusCodes.Status409Conflict)
+        {
+            // 409 is LedgerApi's own duplicate-reversal guard: this exact transaction was already
+            // reversed by a prior attempt. QA's exact reproduction (PR #4 review) is the
+            // lost-response-then-retry scenario this exists for - the money WAS moved, just not by THIS
+            // call, so report Completed (not WriteOff, not an error) back to IdentityApi.
+            reference = request.OriginalTransactionReference;
+            status = "Success";
+            failureReason = null;
+            outcome = "Completed";
+        }
+        catch (Exception ex)
+        {
+            // QA (PR #4): everything else - a 500, a timeout, any other unexpected failure, including a
+            // non-DownstreamApiException such as a transport-level exception - genuinely does not tell us
+            // whether LedgerApi's reversal happened. Leaving IdentityApi's AuthorizationDecision dangling
+            // forever is exactly the bug QA proved out (and IdentityApi's ReversalAuthorizationService has
+            // no idempotency dedup to make a bare retry safe either, a separate pre-existing gap on its
+            // side). So: still report an outcome - WriteOff, since nothing was confirmed recovered - but
+            // flag it as unconfirmed in Notes so a human reviewing ReversalOutcomes later can tell a
+            // confirmed business-rule WriteOff apart from a genuinely uncertain one. Then still surface the
+            // original error to our own caller (do not fabricate a settled result) - the report call
+            // itself is wrapped below so that if IT also fails, that failure is audited, not thrown
+            // unhandled on top of (and masking) the original LedgerApi failure.
+            var detail = ex is DownstreamApiException downstream
+                ? $"status {downstream.StatusCode}"
+                : $"{ex.GetType().Name}: {ex.Message}";
+            try
+            {
+                await identityApiClient.RecordReversalOutcomeAsync(
+                    authorization.Decision.DecisionId,
+                    new IdentityDto.RecordReversalOutcomeRequest(
+                        "WriteOff", "OrchestratorApi",
+                        $"Unconfirmed: LedgerApi call failed with {detail} - needs manual reconciliation"),
+                    cancellationToken);
+            }
+            catch (Exception reportEx)
+            {
+                auditLogger.Record(new AuditLog
+                {
+                    Action = AuditActions.ReversalOutcomeReportFailed,
+                    EntityType = "Reversal",
+                    EntityId = authorization.Decision.DecisionId,
+                    Status = "Failed",
+                    Details = reportEx.Message,
+                });
+            }
+
+            auditLogger.Record(new AuditLog
+            {
+                Action = AuditActions.ReversalPosted,
+                EntityType = "Reversal",
+                EntityId = request.OriginalTransactionReference,
+                Status = "Unconfirmed",
+                Details = $"DecisionId {authorization.Decision.DecisionId}; LedgerApi failure: {ex.Message}",
+            });
+            await dbContext.SaveChangesAsync(cancellationToken);
+
+            throw;
+        }
 
         // Report the real outcome back to IdentityApi (already built, T-020) - RecordedBy/Notes are fixed
-        // for v1 (task file): nothing richer than the outcome itself is captured yet.
+        // for v1 (task file): nothing richer than the outcome itself is captured yet. (The genuinely
+        // unknown/unconfirmed path above reports its own outcome, with Notes, and returns before this
+        // point - it never reaches here.)
         await identityApiClient.RecordReversalOutcomeAsync(
             authorization.Decision.DecisionId,
             new IdentityDto.RecordReversalOutcomeRequest(outcome, "OrchestratorApi", null),
