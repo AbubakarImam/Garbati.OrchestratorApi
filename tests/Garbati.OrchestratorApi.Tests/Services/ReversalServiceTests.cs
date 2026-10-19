@@ -3,6 +3,7 @@ using Garbati.OrchestratorApi.Data;
 using Garbati.OrchestratorApi.Exceptions;
 using Garbati.OrchestratorApi.Services;
 using Garbati.OrchestratorApi.Tests.Fixtures;
+using Microsoft.EntityFrameworkCore;
 using IdentityDto = Garbati.OrchestratorApi.Clients.Contracts.Identity;
 using LedgerDto = Garbati.OrchestratorApi.Clients.Contracts.Ledger;
 
@@ -238,6 +239,34 @@ public class ReversalServiceTests(PostgresFixture fixture) : IAsyncLifetime
         Assert.Equal("LedgerApi", ex.ServiceName);
         Assert.Equal(500, ex.StatusCode);
         Assert.Equal(1, identity.RecordReversalOutcomeCallCount);
+    }
+
+    // QA re-review (PR #4, Should-fix): the earlier fix only wrapped the outcome-report call on the
+    // catch-all (unexpected-failure) path, not this one - the normal path reached after a 2xx/404/409/422
+    // LedgerApi result, where the real outcome is already settled. A failure reporting THAT to IdentityApi
+    // must not turn an already-resolved result into an opaque error for our own caller, the same principle
+    // the catch-all branch already applies to its own report call.
+    [Fact]
+    public async Task ReverseAsync_WhenApproved_AndReportingTheOutcomeFails_StillReturnsTheRealResult_NotAnError()
+    {
+        await using var ctx = fixture.CreateContext();
+        var identity = new FakeIdentityApiClient
+        {
+            RecordReversalOutcomeHandler = (_, _) => throw new DownstreamApiException(
+                "IdentityApi", 503, "IdentityApi is unavailable."),
+        };
+        var ledger = new FakeLedgerApiClient();
+        var service = CreateService(ctx, identity, ledger);
+
+        var response = await service.ReverseAsync(NewRequest());
+
+        Assert.Equal("Success", response.Status);
+        Assert.Null(response.FailureReason);
+        Assert.Equal(1, identity.RecordReversalOutcomeCallCount);
+
+        var failureAudit = await ctx.AuditLogs.SingleAsync(a => a.Action == "ReversalOutcomeReportFailed");
+        Assert.Equal("Failed", failureAudit.Status);
+        Assert.Contains("Completed", failureAudit.Details);
     }
 
     [Fact]

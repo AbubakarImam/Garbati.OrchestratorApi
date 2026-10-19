@@ -174,10 +174,31 @@ public class ReversalService(
         // for v1 (task file): nothing richer than the outcome itself is captured yet. (The genuinely
         // unknown/unconfirmed path above reports its own outcome, with Notes, and returns before this
         // point - it never reaches here.)
-        await identityApiClient.RecordReversalOutcomeAsync(
-            authorization.Decision.DecisionId,
-            new IdentityDto.RecordReversalOutcomeRequest(outcome, "OrchestratorApi", null),
-            cancellationToken);
+        //
+        // QA re-review (PR #4): by this point the real outcome is already settled - LedgerApi either
+        // moved the money, definitively couldn't, or already had on a prior attempt. If telling IdentityApi
+        // about it now fails, that must not turn an already-resolved result into an opaque error for our
+        // own caller the way the original bug did for a LedgerApi failure - it's audited instead, exactly
+        // the same way the catch-all branch above already handles its own outcome-report call failing, so
+        // a human can follow up (or a retry's 409 branch self-heals it) without masking the real result.
+        try
+        {
+            await identityApiClient.RecordReversalOutcomeAsync(
+                authorization.Decision.DecisionId,
+                new IdentityDto.RecordReversalOutcomeRequest(outcome, "OrchestratorApi", null),
+                cancellationToken);
+        }
+        catch (Exception reportEx)
+        {
+            auditLogger.Record(new AuditLog
+            {
+                Action = AuditActions.ReversalOutcomeReportFailed,
+                EntityType = "Reversal",
+                EntityId = authorization.Decision.DecisionId,
+                Status = "Failed",
+                Details = $"Outcome was {outcome} but reporting it to IdentityApi failed: {reportEx.Message}",
+            });
+        }
 
         auditLogger.Record(new AuditLog
         {
