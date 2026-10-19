@@ -16,4 +16,8 @@ public interface IIdentityApiClient
 
     Task<AuthorizationResponse> RequestAuthorizationAsync(
         AuthorizationRequest request, CancellationToken cancellationToken);
+
+    // T-030: reports LedgerApi's real reversal outcome back to IdentityApi (already built, T-020).
+    Task<ReversalOutcomeResponse> RecordReversalOutcomeAsync(
+        string decisionId, RecordReversalOutcomeRequest request, CancellationToken cancellationToken);
 }

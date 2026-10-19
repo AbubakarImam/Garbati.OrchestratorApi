@@ -8,4 +8,7 @@ public interface ILedgerApiClient
     Task<AccountResponse> CreateAccountAsync(CreateAccountRequest request, CancellationToken cancellationToken);
 
     Task<TransferResponse> TransferAsync(TransferRequest request, CancellationToken cancellationToken);
+
+    // T-030: LedgerApi's existing ReversalsController (LedgerScopes.Reverse policy), already built.
+    Task<ReversalResponse> ReverseAsync(ReversalRequest request, CancellationToken cancellationToken);
 }
