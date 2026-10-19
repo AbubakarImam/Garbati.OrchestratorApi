@@ -12,4 +12,8 @@ public static class AuditActions
     public const string TransferAuthorized = "TransferAuthorized";
     public const string TransferDenied = "TransferDenied";
     public const string TransferPosted = "TransferPosted";
+
+    public const string ReversalAuthorized = "ReversalAuthorized";
+    public const string ReversalDenied = "ReversalDenied";
+    public const string ReversalPosted = "ReversalPosted";
 }

@@ -96,10 +96,12 @@ try
 
     builder.Services.AddScoped<IAccountOpeningService, AccountOpeningService>();
     builder.Services.AddScoped<ITransferOrchestrationService, TransferService>();
+    builder.Services.AddScoped<IReversalOrchestrationService, ReversalService>();
     builder.Services.AddScoped<IAuditLogger, AuditLogger>();
 
     builder.Services.AddScoped<StartAccountOpeningRequestValidator>();
     builder.Services.AddScoped<TransferRequestValidator>();
+    builder.Services.AddScoped<ReversalRequestValidator>();
 
     // This service as a client of IdentityApi/LedgerApi (task file: "an HTTP client setup ... configured
     // with this service's own API key for each"). BaseAddress and the outgoing X-Api-Key value come from
