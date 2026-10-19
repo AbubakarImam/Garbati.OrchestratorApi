@@ -1,10 +1,10 @@
 # Garbati.OrchestratorApi — Design Document (v1, minimal)
 
-**Status:** Design v1 (minimal) — ratified and **built** (`garbati-platform` T-022, `feat/foundation`, 18 October 2026 — see Appendix A for build notes and judgment calls).
-**Last updated:** 18 October 2026
+**Status:** Design v1 (minimal) — ratified and **built** (`garbati-platform` T-022, `feat/foundation`, 18 October 2026 — see Appendix A for build notes and judgment calls). Reversal (Section 1.5a) added by T-030, 19 October 2026 — see Appendix C.
+**Last updated:** 19 October 2026
 **Service name:** `OrchestratorApi` (`Garbati.OrchestratorApi`)
 **Platform:** Garbati — see [`garbati-platform/ARCHITECTURE.md`](https://github.com/AbubakarImam/garbati-platform/blob/main/ARCHITECTURE.md) Sections 2–4 and 10 for the platform-wide flows this document implements a minimal slice of; this document never repeats that file, only this service's detail.
-**Decision history:** `garbati-platform/TASKS.md` D-1 (demo scope, revised 16 Oct 2026), D-6 (token-verification timing), D-10 (hosting, still open).
+**Decision history:** `garbati-platform/TASKS.md` D-1 (demo scope, revised 16 Oct 2026), D-6 (token-verification timing), D-10 (hosting, still open), D-14 (reversal endpoint, owner-approved 19 Oct 2026).
 
 ## 1. Purpose and scope
 
@@ -70,6 +70,39 @@ Caller (Swagger, standing in for a real Channel — see 1.6)
 
 No new Orchestrator-side persistent state is needed for a transfer: unlike account opening, this is a short, synchronous call chain where both IdentityApi's grant issuance and LedgerApi's transfer posting are already independently idempotent. If the Orchestrator crashes mid-call, the caller retries with the same idempotency key and both downstream services return their already-stored results rather than double-acting.
 
+### 1.5a Reversal flow (T-030, `garbati-platform` D-14 — mirrors 1.5)
+
+Decision #8 deferred reversal entirely until `garbati-platform` T-015 defined reversal authority. T-015/T-020 (`Garbati.IdentityApi`) and T-021 have since done that — this section closes the gap decision #8 and open question #3 (Section 3) both anticipated, by mirroring 1.5's shape for a different operation:
+
+```text
+Caller (Swagger/the ops console's future backend-for-frontend, Garbati.OpsApi/T-028 — not built yet)
+  -> Orchestrator: POST /v1/reversals
+       - calls IdentityApi: POST /v1/authorization/requests, Operation = "Reversal"
+           (a different Operation literal than a transfer's "Debit" - IdentityApi's
+            AuthorizationRequestValidator treats "Reversal" as a second, separate kind of Operation,
+            never a MandateOperation value, decision #31 on IdentityApi's side)
+           DebitAccountId carries the original transaction reference for this operation (IdentityApi's
+           own documented convention - there is no dedicated field for it); CreditAccountId is null.
+       - On denial: stop, do not call LedgerApi - identical to 1.11's transfer-denial row.
+       - On approval, calls LedgerApi: POST /api/reversals (its existing ReversalsController, already
+         built - not a chain reversal, no fee/tax leg in this version, same reasoning as 1.5's plain
+         /api/transfers choice)
+       - Reports the real LedgerApi outcome back to IdentityApi:
+         POST /v1/authorization/requests/{id}/reversal-outcome
+           - LedgerApi's reversal succeeds -> Outcome: "Completed"
+           - LedgerApi's reversal fails on a business rule (e.g. insufficient funds on the account being
+             reversed from) -> Outcome: "WriteOff" (ReversalOutcomeKind is deliberately two-state,
+             decision #34 on IdentityApi's side, reconfirmed by T-021 - not a third state to invent)
+         IdentityApi's own design (Section 8) anticipated this call coming from "the ops channel (or the
+         Orchestrator)" - settled here as the Orchestrator, since it directly observes LedgerApi's real
+         result, not a relay of something another service saw.
+       - returns the reversal result plus the authorization decision id (jti), same shape as 1.5
+```
+
+No new Orchestrator-side persistent state here either, for the same reason 1.5 needs none: the three downstream calls are each independently idempotent/safe to retry on the service that owns them.
+
+**Deployment gap (same kind of operational step 1.10 already describes, not a code change):** this flow needs two scope grants OrchestratorApi does not hold today - `identity.ops.reversal` on its IdentityApi service key, and `ledger.reverse` on its LedgerApi service key. Until an operator grants both in Azure App Service configuration, every call into this flow 403s on its first downstream call. See the T-030 PR description for the exact grants needed; this was not, and could not be, live-tested end-to-end before that happens.
+
 ### 1.6 Where "the Channel" is, for this demo (decision #3)
 
 No Channel service exists yet, and building one is out of scope here. For this demo, **the caller of the Orchestrator's own API supplies the `CustomerId` directly in the request** — there is no real authenticated session standing behind it. This is a known, deliberate simplification, and it is the exact same gap IdentityApi's own design already flags as unresolved (`Garbati.IdentityApi/docs/DESIGN.md` Section 10, item 5 — the BOLA/"channel identity mapping" open question): nothing here should be read as a solved authentication story. State this plainly wherever the demo is shown, the same way D-6's token-verification gap is stated plainly.
@@ -90,6 +123,7 @@ IdentityApi issues a **real** signed grant for every transfer (its own design do
 | `GET /v1/account-openings/{id}` | Current state — which step, and `customerId`/`ledgerAccountId` if set. |
 | `POST /v1/account-openings/{id}/retry` | Re-runs from `CurrentStep` onward (1.4). |
 | `POST /v1/transfers` | The flow in 1.5. Body: `idempotencyKey`, `requestedBy` (CustomerId — see 1.6), `debitAccountId`, `creditAccountId`, `amount`, `currency`, `narration`. |
+| `POST /v1/reversals` | The flow in 1.5a (T-030). Body: `idempotencyKey`, `requestedBy`, `originalTransactionReference`, `amount`, `currency`, `reasonCode`. |
 
 Funding is **not** a new Orchestrator endpoint — the demo calls LedgerApi's existing `POST /api/deposits` directly, exactly as LedgerApi's own README walkthrough already does, since 1.8 established that step needs no orchestration.
 
@@ -97,8 +131,8 @@ Funding is **not** a new Orchestrator endpoint — the demo calls LedgerApi's ex
 
 The Orchestrator authenticates to both downstream services as a trusted service client, using the scopes each service already defines — no new scopes needed on either side:
 
-- **From IdentityApi:** `identity.customer.write`, `identity.kyc.manage`, `identity.mandate.write`, `identity.authorization.check`.
-- **From LedgerApi:** `ledger.accounts` (create account), `ledger.transfer` (transfers).
+- **From IdentityApi:** `identity.customer.write`, `identity.kyc.manage`, `identity.mandate.write`, `identity.authorization.check`, and (T-030) `identity.ops.reversal` — **not yet granted on the deployed credential; see 1.5a.**
+- **From LedgerApi:** `ledger.accounts` (create account), `ledger.transfer` (transfers), and (T-030) `ledger.reverse` — **not yet granted on the deployed credential; see 1.5a.**
 
 ### 1.11 Failure handling
 
@@ -108,10 +142,12 @@ The Orchestrator authenticates to both downstream services as a trusted service 
 | IdentityApi denies authorization for a transfer | Stop; do not call LedgerApi. Return the denial reason, not a fabricated success. |
 | IdentityApi times out/unavailable | Fail closed (matches `Garbati.IdentityApi/docs/DESIGN.md` decision #10) — do not call LedgerApi. |
 | LedgerApi times out after the transfer call | Retry with the **same** idempotency key to learn the real outcome (matches LedgerApi's own existing guidance) — never blindly issue a new transfer. |
+| IdentityApi denies authorization for a reversal (T-030) | Stop; do not call LedgerApi. Same rule as a transfer denial. |
+| LedgerApi's reversal fails on a business rule after authorization succeeded (T-030) | Report `Outcome: "WriteOff"` back to IdentityApi (1.5a) — not treated as an unexpected error, a settled outcome. Any other LedgerApi failure (not found, already reversed, genuinely unavailable) is not given this treatment and surfaces as an unexpected error, same as an unhandled LedgerApi failure on the transfer path. |
 
 ### 1.12 Audit
 
-One audit row per operation-level event: account-opening step started/completed/failed, transfer authorized/posted/denied. Includes the correlation id and, for a transfer, the authorization decision id (`jti`) — never the grant token itself (matches both services' existing logging rules).
+One audit row per operation-level event: account-opening step started/completed/failed, transfer authorized/posted/denied, and (T-030) reversal authorized/posted/denied. Includes the correlation id and, for a transfer or reversal, the authorization decision id (`jti`) — never the grant token itself (matches both services' existing logging rules).
 
 ---
 
@@ -126,7 +162,7 @@ One audit row per operation-level event: account-opening step started/completed/
 | 5 | Funding authorization | Route the fund step through IdentityApi; call LedgerApi's mock deposit directly | **Confirmed:** no IdentityApi call. LedgerApi's deposit endpoint is already documented as a mock funding flow, not a customer-mandate operation. |
 | 6 | KYC verification for the demo | Require a real provider integration; auto-approve immediately as a stated stub | **Confirmed:** auto-approve, explicitly labeled a demo stub. Real provider integration is out of scope for both this service and IdentityApi's own v2 design. |
 | 7 | Fee/tax in this version | Have the Orchestrator compute a fee itself; omit fees entirely until ProductApi exists | **Confirmed (D-1, revised 16 Oct 2026): omit entirely.** Computing a fee here would put a money-rule decision in the wrong component (P-4). |
-| 8 | Reversal in this version | Call LedgerApi's reversal with no IdentityApi check; omit reversal entirely | **Confirmed (D-1, revised 16 Oct 2026): omit entirely**, until `garbati-platform` T-015 defines reversal authority. |
+| 8 | Reversal in this version | Call LedgerApi's reversal with no IdentityApi check; omit reversal entirely | **Confirmed (D-1, revised 16 Oct 2026): omit entirely**, until `garbati-platform` T-015 defines reversal authority. **Superseded by T-030 (D-14, 19 Oct 2026): built, mirroring 1.5 (see 1.5a), now that T-015/T-020/T-021 have defined that authority.** |
 | 9 | Repository/deployment shape | Own repo now, merge into one deployable with ProductApi later; design as if already merged | **Chosen for now, not fully settled:** its own repo/deployable, since ProductApi does not exist yet. `garbati-platform` D-10 (Orchestrator + Product in one deployable) stays open — revisit when ProductApi is actually built, rather than restructuring speculatively now. |
 
 ---
@@ -135,7 +171,7 @@ One audit row per operation-level event: account-opening step started/completed/
 
 1. **D-10 (hosting).** Whether Orchestrator and Product end up in one deployable is still open — decision #9 above explains why this document doesn't need to resolve it yet.
 2. **Fee/tax reintroduction.** Once ProductApi exists, the transfer flow (1.5) gains a ProductApi call between the authorization check and the LedgerApi call, and the LedgerApi call becomes a chain (decision #45) instead of a plain transfer. Nothing else in this document should need to change.
-3. **Reversal reintroduction.** Once `garbati-platform` T-015 defines reversal authority, this document needs a new section mirroring 1.5, calling whatever IdentityApi endpoint T-015 produces before calling LedgerApi's reversal/chain-reversal endpoint.
+3. **Reversal reintroduction.** ~~Once `garbati-platform` T-015 defines reversal authority, this document needs a new section mirroring 1.5, calling whatever IdentityApi endpoint T-015 produces before calling LedgerApi's reversal/chain-reversal endpoint.~~ **Done — see 1.5a (T-030).** Still open after T-030: the two scope grants 1.5a/1.10 flag as not yet made in Azure App Service configuration, and live end-to-end testing against real IdentityApi/LedgerApi, both blocked on that grant.
 4. **Token forwarding.** Once LedgerApi decision #47 exists, 1.7's "marked seam" closes: the transfer call gains a grant field, and LedgerApi becomes the final independent verifier, matching `Garbati.IdentityApi/docs/DESIGN.md` 3.4's full design.
 5. **Real Channel / authentication.** Decision #3's gap (trusting a caller-supplied `CustomerId`) must be closed before this is ever exposed to real customers, not just recruiters viewing Swagger.
 6. **Joint-account transfers.** This version only exercises IdentityApi's single-holder path. A real joint-account transfer through the Orchestrator (handling a `Pending` approval result, not just `Approved`/denied) is unexercised until a demo or real need calls for it.
@@ -172,3 +208,17 @@ correct. Fixed by changing the constant to `"Tier2"` — still a placeholder/dem
 supports the "account opening, plain transfer" scope T-022 was built for. `IdentityApi`'s seed data and
 `MandateEligibility` were not touched; they were already correct. See the PR description for the test
 added and the full LEARNING_LOG entry.
+
+---
+
+## Appendix C. T-030 build notes (reversal endpoint)
+
+Built Section 1.5a in one task, on `feat/t-030-reversal-endpoint`. Judgment calls made along the way:
+
+1. **`Clients/Contracts/Identity/AuthorizationRequest.cs` (this service's own mirror of IdentityApi's real contract) was out of date and had to be caught up.** It still had `CreditAccountId` as non-nullable and no `ReasonCode` field at all — correct as of T-022 (18 Oct 2026), but IdentityApi's own contract had already grown both (T-020, same day, confirmed against its live source: `CreditAccountId` is now `string?`, and `ReasonCode` was added as an optional trailing field). This task widens both to match — additive/backward-compatible for `TransferService`'s existing call (still sends a non-null `CreditAccountId`, never sets `ReasonCode`) — rather than inventing a second, divergent mirror type for reversal alone.
+2. **LedgerApi's reversal failure path is exception-based, not body-based, unlike transfer.** `LedgerApi.ReversalsController`/`ReversalService` always throws before building a response on any failure (insufficient funds, already reversed, not found — its own decision #27: "no failed row is kept"), unlike its `TransfersController`, which commits and returns a `Status: "Failed"` body with `200`/`422`. So `ILedgerApiClient.ReverseAsync` mirrors `CreateAccountAsync`'s plain throw-on-non-success shape, not `TransferAsync`'s dual-success handling — confirmed by reading `LedgerApi`'s live `ReversalService.cs`/`LegReverser.cs`/`ExceptionHandlingMiddleware.cs` source directly (available locally, read-only — no file in that repo was touched).
+3. **Only a `422` from LedgerApi's reversal call is treated as `WriteOff`; everything else propagates as an unexpected error.** The task file's own example for `WriteOff` is "insufficient balance," which LedgerApi maps to `422 Insufficient funds` — a business-rule rejection *of an authorized reversal that was actually attempted*. A `404`/`409` (bad `OriginalTransactionReference`, already reversed) is a different class of problem — the reversal was never really attempted on a valid target — and reporting `WriteOff` for those would misrepresent "money not recovered" when no attempt to recover it was ever valid in the first place. `ReversalService.ReverseAsync` therefore only catches `DownstreamApiException` where `StatusCode == 422`; anything else (including a genuine LedgerApi outage) surfaces the same way an unhandled `DownstreamApiException` already does on the transfer path — as an opaque `500`, not a fabricated settled outcome.
+4. **`ReversalResultResponse.Status` uses the same `"Success"/"Failed"` vocabulary as `TransferResultResponse`, not the `"Completed"/"WriteOff"` vocabulary reported to IdentityApi.** The task file didn't specify this field's value on the `WriteOff` branch. Keeping it in the existing `Success`/`Failed` vocabulary lets `ReversalsController` mirror `TransfersController`'s exact `response.Status == "Failed" ? UnprocessableEntity(response) : Ok(response)` line verbatim, and keeps "the result of calling LedgerApi" (this field) a separate concept from "what IdentityApi was told happened to the money" (the `Outcome` string in the third call) — they answer different questions and this keeps them from being conflated.
+5. **Deployment, not yet done:** `OrchestratorApi`'s `IdentityApi` and `LedgerApi` service keys need the new scopes `identity.ops.reversal` and `ledger.reverse` respectively (Azure App Service configuration, outside this repo). **Not done as part of this PR** — see the PR description. Live end-to-end testing against real IdentityApi/LedgerApi could not happen before that grant exists.
+
+See the PR description for how this was tested and the full LEARNING_LOG entry.
