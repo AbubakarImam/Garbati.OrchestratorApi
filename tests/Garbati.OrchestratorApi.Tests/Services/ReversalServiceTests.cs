@@ -112,6 +112,135 @@ public class ReversalServiceTests(PostgresFixture fixture) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ReverseAsync_WhenLedgerApiReturns404_ReportsWriteOffOutcome()
+    {
+        // QA (PR #4): a 404 (original transaction reference not found) is a validly-attempted reversal
+        // that could not happen - the same WriteOff bucket as a 422, just a different reason. The original
+        // code only caught 422, so a 404 propagated unhandled and IdentityApi's decision was never
+        // reported on at all.
+        await using var ctx = fixture.CreateContext();
+        var identity = new FakeIdentityApiClient();
+        var ledger = new FakeLedgerApiClient
+        {
+            ReverseHandler = _ => throw new DownstreamApiException(
+                "LedgerApi", 404, "Original transaction not found."),
+        };
+        var service = CreateService(ctx, identity, ledger);
+
+        IdentityDto.RecordReversalOutcomeRequest? reportedOutcome = null;
+        identity.RecordReversalOutcomeHandler = (id, r) =>
+        {
+            reportedOutcome = r;
+            return new IdentityDto.ReversalOutcomeResponse(id, r.Outcome, DateTimeOffset.UtcNow, r.RecordedBy, r.Notes);
+        };
+
+        var result = await service.ReverseAsync(NewRequest());
+
+        Assert.Equal(1, identity.RecordReversalOutcomeCallCount);
+        Assert.Equal("Failed", result.Status);
+        Assert.Equal("TXN-ORIGINAL1", result.Reference);
+        Assert.Contains("Original transaction not found.", result.FailureReason);
+
+        Assert.NotNull(reportedOutcome);
+        Assert.Equal("WriteOff", reportedOutcome!.Outcome);
+    }
+
+    [Fact]
+    public async Task ReverseAsync_WhenLedgerApiReturns409_ReportsCompletedOutcome_NotWriteOff()
+    {
+        // QA's exact reproduction (PR #4): a 409 is LedgerApi's own duplicate-reversal guard, meaning this
+        // transaction was already reversed by a prior attempt whose response the caller never saw
+        // (lost-response-then-retry). The money WAS moved - this must report Completed, not WriteOff and
+        // not an unhandled error, or IdentityApi's decision is left dangling forever on every retry.
+        await using var ctx = fixture.CreateContext();
+        var identity = new FakeIdentityApiClient();
+        var ledger = new FakeLedgerApiClient
+        {
+            ReverseHandler = _ => throw new DownstreamApiException(
+                "LedgerApi", 409, "This transaction has already been reversed."),
+        };
+        var service = CreateService(ctx, identity, ledger);
+
+        IdentityDto.RecordReversalOutcomeRequest? reportedOutcome = null;
+        identity.RecordReversalOutcomeHandler = (id, r) =>
+        {
+            reportedOutcome = r;
+            return new IdentityDto.ReversalOutcomeResponse(id, r.Outcome, DateTimeOffset.UtcNow, r.RecordedBy, r.Notes);
+        };
+
+        var result = await service.ReverseAsync(NewRequest());
+
+        Assert.Equal(1, identity.RecordReversalOutcomeCallCount);
+        Assert.Equal("Success", result.Status);
+        Assert.Null(result.FailureReason);
+
+        Assert.NotNull(reportedOutcome);
+        Assert.Equal("Completed", reportedOutcome!.Outcome);
+    }
+
+    [Fact]
+    public async Task ReverseAsync_WhenLedgerApiFailsWithAnUnexpectedError_StillReportsAnUnconfirmedWriteOffOutcome_ButRethrowsTheOriginalError()
+    {
+        // QA (PR #4): a 500 (or any other unexpected failure) means we genuinely do not know whether
+        // LedgerApi's reversal happened. The fix must still report *something* to IdentityApi (WriteOff,
+        // flagged "Unconfirmed" in Notes for manual reconciliation) rather than leaving the
+        // AuthorizationDecision dangling forever - but the original error must still surface to our own
+        // caller, not be swallowed by a fabricated success.
+        await using var ctx = fixture.CreateContext();
+        var identity = new FakeIdentityApiClient();
+        var ledger = new FakeLedgerApiClient
+        {
+            ReverseHandler = _ => throw new DownstreamApiException(
+                "LedgerApi", 500, "Internal server error."),
+        };
+        var service = CreateService(ctx, identity, ledger);
+
+        IdentityDto.RecordReversalOutcomeRequest? reportedOutcome = null;
+        identity.RecordReversalOutcomeHandler = (id, r) =>
+        {
+            reportedOutcome = r;
+            return new IdentityDto.ReversalOutcomeResponse(id, r.Outcome, DateTimeOffset.UtcNow, r.RecordedBy, r.Notes);
+        };
+
+        var ex = await Assert.ThrowsAsync<DownstreamApiException>(() => service.ReverseAsync(NewRequest()));
+
+        Assert.Equal(500, ex.StatusCode);
+        Assert.Equal(1, identity.RecordReversalOutcomeCallCount);
+
+        Assert.NotNull(reportedOutcome);
+        Assert.Equal("WriteOff", reportedOutcome!.Outcome);
+        Assert.NotNull(reportedOutcome.Notes);
+        Assert.Contains("Unconfirmed", reportedOutcome.Notes);
+        Assert.Contains("500", reportedOutcome.Notes);
+    }
+
+    [Fact]
+    public async Task ReverseAsync_WhenLedgerApiFailsUnexpectedly_AndReportingTheOutcomeAlsoFails_StillRethrowsTheOriginalError()
+    {
+        // The outcome-report call itself failing must not mask the original LedgerApi failure by throwing
+        // a different, unhandled exception on top of it (QA's "make sure... it doesn't throw unhandled
+        // and mask the original problem").
+        await using var ctx = fixture.CreateContext();
+        var identity = new FakeIdentityApiClient
+        {
+            RecordReversalOutcomeHandler = (_, _) => throw new DownstreamApiException(
+                "IdentityApi", 503, "IdentityApi is unavailable."),
+        };
+        var ledger = new FakeLedgerApiClient
+        {
+            ReverseHandler = _ => throw new DownstreamApiException(
+                "LedgerApi", 500, "Internal server error."),
+        };
+        var service = CreateService(ctx, identity, ledger);
+
+        var ex = await Assert.ThrowsAsync<DownstreamApiException>(() => service.ReverseAsync(NewRequest()));
+
+        Assert.Equal("LedgerApi", ex.ServiceName);
+        Assert.Equal(500, ex.StatusCode);
+        Assert.Equal(1, identity.RecordReversalOutcomeCallCount);
+    }
+
+    [Fact]
     public async Task ReverseAsync_SendsReversalAsTheOperation_AndOriginalTransactionReferenceAsDebitAccountId()
     {
         // T-024-shaped regression test (task file T-030): assert the exact AuthorizationRequest fields

@@ -63,6 +63,30 @@ public class IdentityApiClientTests
     }
 
     [Fact]
+    public async Task RequestAuthorizationAsync_ForANormalTransferRequest_StillSendsAHarmlessNullReasonCode()
+    {
+        // QA nit (T-030, PR #4): widening AuthorizationRequest to add ReasonCode (for Reversal) means
+        // PostAsJsonAsync now serializes an extra "reasonCode":null on every existing transfer call too,
+        // since System.Text.Json's default behavior here (confirmed by this test, not assumed) is to
+        // write null-valued properties rather than omit them. QA confirmed this is harmless today -
+        // IdentityApi's real RequestAuthorizationRequestValidator ignores ReasonCode for every Operation
+        // except "Reversal" - but it was untested at the wire level. Pinning the exact body here means a
+        // future change to either side's serialization defaults (e.g. adding
+        // JsonIgnoreCondition.WhenWritingNull) is a deliberate, visible decision, not a silent drift.
+        var handler = new FakeHttpMessageHandler(HttpStatusCode.OK,
+            """{"decision":{"decisionId":"DEC-1","approved":true,"reasonCode":null,"requestedBy":"CUS-1","operation":"Debit","debitAccountId":"ACC-1","creditAccountId":"ACC-2","amount":"100.00","currency":"NGN","mandateId":null,"decidedAt":"2026-10-18T00:00:00Z"},"grant":"g","grantExpiresAt":"2026-10-18T00:00:30Z"}""");
+        var client = CreateClient(handler);
+
+        // TransferService never sets ReasonCode - defaults to null, same as the real call site.
+        await client.RequestAuthorizationAsync(
+            new AuthorizationRequest("CUS-1", "Debit", "ACC-1", "ACC-2", 100m, "NGN", "key-probe"), CancellationToken.None);
+
+        Assert.Equal(
+            """{"requestedBy":"CUS-1","operation":"Debit","debitAccountId":"ACC-1","creditAccountId":"ACC-2","amount":100,"currency":"NGN","idempotencyKey":"key-probe","reasonCode":null}""",
+            handler.LastRequestBody);
+    }
+
+    [Fact]
     public async Task CreateCustomerAsync_OnA400_ThrowsDownstreamApiException_WithTheValidationErrors()
     {
         // Confirmed against the live controller: BadRequest(errors) where errors is a plain
