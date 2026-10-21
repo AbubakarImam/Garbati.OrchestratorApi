@@ -1,7 +1,7 @@
 # Garbati.OrchestratorApi — Design Document (v1, minimal)
 
-**Status:** Design v1 (minimal) — ratified and **built** (`garbati-platform` T-022, `feat/foundation`, 18 October 2026 — see Appendix A for build notes and judgment calls). Reversal (Section 1.5a) added by T-030, 19 October 2026 — see Appendix C.
-**Last updated:** 19 October 2026
+**Status:** Design v1 (minimal) — ratified and **built** (`garbati-platform` T-022, `feat/foundation`, 18 October 2026 — see Appendix A for build notes and judgment calls). Reversal (Section 1.5a) added by T-030, 19 October 2026 — see Appendix C. Transfer-side LedgerApi-failure audit gap (1.5, 1.11) closed by T-036, 21 October 2026 — see Appendix D.
+**Last updated:** 21 October 2026
 **Service name:** `OrchestratorApi` (`Garbati.OrchestratorApi`)
 **Platform:** Garbati — see [`garbati-platform/ARCHITECTURE.md`](https://github.com/AbubakarImam/garbati-platform/blob/main/ARCHITECTURE.md) Sections 2–4 and 10 for the platform-wide flows this document implements a minimal slice of; this document never repeats that file, only this service's detail.
 **Decision history:** `garbati-platform/TASKS.md` D-1 (demo scope, revised 16 Oct 2026), D-6 (token-verification timing), D-10 (hosting, still open), D-14 (reversal endpoint, owner-approved 19 Oct 2026).
@@ -64,6 +64,18 @@ Caller (Swagger, standing in for a real Channel — see 1.6)
        - Orchestrator may verify the grant itself as defence in depth (DESIGN.md 3.4)
        - calls LedgerApi: POST /api/transfers (ordinary single transfer, no fee/tax legs)
            (the grant is NOT yet forwarded into this call — see 1.7, D-6)
+           - a business-rule failure (e.g. insufficient funds) comes back as a normal body,
+             Status: "Failed" — handled below, not an exception
+           - anything else the call throws (404/409/500, a timeout, any other unexpected
+             failure) after authorization already succeeded (T-036): write a TransferPosted
+             audit row, Status: "Unconfirmed", keyed by the decision id (no LedgerApi
+             reference exists yet on this path) — then rethrow the original error unchanged.
+             Unlike 1.5a's reversal flow, there is no outcome to report to IdentityApi here:
+             IdentityApi has no transfer-outcome-reporting endpoint, only
+             POST .../reversal-outcome — transfers never got the deferred-grant-verification
+             machinery reversals did (decision #47/D-6 is still deferred for both). So this is
+             audit-trail-only: a durable record that this transfer's outcome is unconfirmed,
+             traceable by the decision id, not a new cross-service call.
        - returns the transfer result plus the authorization decision id (jti),
          so the operation is traceable end to end without logging the grant itself
 ```
@@ -157,6 +169,7 @@ The Orchestrator authenticates to both downstream services as a trusted service 
 | IdentityApi denies authorization for a transfer | Stop; do not call LedgerApi. Return the denial reason, not a fabricated success. |
 | IdentityApi times out/unavailable | Fail closed (matches `Garbati.IdentityApi/docs/DESIGN.md` decision #10) — do not call LedgerApi. |
 | LedgerApi times out after the transfer call | Retry with the **same** idempotency key to learn the real outcome (matches LedgerApi's own existing guidance) — never blindly issue a new transfer. |
+| LedgerApi's transfer call throws after authorization succeeded (T-036, closing the same class of gap PR #4/T-030 closed for reversal) | No outcome to report to IdentityApi (no equivalent endpoint exists for a transfer, see 1.5) — write a `TransferPosted` audit row, `Status: "Unconfirmed"`, keyed by the decision id, then rethrow the original error unchanged. The 422-with-body business-rule-failure case is unaffected — that is a normal, already-handled response, not an exception. |
 | IdentityApi denies authorization for a reversal (T-030) | Stop; do not call LedgerApi. Same rule as a transfer denial. |
 | LedgerApi's reversal call fails after authorization succeeded (T-030, generalized by the PR #4 QA fix) | Report an `Outcome` back to IdentityApi (1.5a) by status code every time — `404`/`422` → `"WriteOff"` (validly attempted, could not happen); `409` (LedgerApi's own duplicate-reversal guard) → `"Completed"` (it already happened on a prior attempt); anything else (`500`, timeout, truly unexpected) → `"WriteOff"` with `Notes` marked unconfirmed for manual reconciliation, **and the original error still surfaces to the Orchestrator's own caller** — the outcome is never left unreported, because IdentityApi has no idempotency dedup on its side to make a bare retry safe either. |
 
@@ -239,3 +252,16 @@ Built Section 1.5a in one task, on `feat/t-030-reversal-endpoint`. Judgment call
 7. **QA re-review follow-up (same PR, 19 Oct 2026): the *normal*-path outcome-report call (reached after a 2xx/404/409/422 LedgerApi result, note 6) now gets the same defensive wrapping the catch-all branch already had.** QA found this asymmetry: by the time that call runs, the real outcome is already settled (LedgerApi moved the money, definitively couldn't, or already had on a prior attempt) — if reporting it to IdentityApi then failed, the exception propagated unhandled, turning an already-resolved result into an opaque `500` for the Orchestrator's own caller, with no audit row at all. Wrapped the same way as note 6's catch-all: on failure, record `ReversalOutcomeReportFailed` (with the already-determined outcome in `Details`, so it reads differently from the catch-all's "Unconfirmed" case) and still return the real, already-known result to the caller rather than masking it behind a reporting failure.
 
 See the PR description for how this was tested and the full LEARNING_LOG entry.
+
+---
+
+## Appendix D. T-036 build notes (`TransferService` LedgerApi-failure audit gap)
+
+Found by an external QA pass (opencode, 21 Oct 2026) and independently confirmed against the real code: `TransferService.TransferAsync` had **no error handling at all** around its call to `ledgerApiClient.TransferAsync` — an asymmetry against `ReversalService.ReverseAsync`, which Appendix C/note 6 above already hardened for exactly this class of failure. If `ledgerApiClient.TransferAsync` threw (a `404`/`409`/`500`, a timeout, any unexpected `DownstreamApiException` or transport failure) after `IdentityApi` had already authorized the transfer, the exception reached `ExceptionHandlingMiddleware` unhandled: a bare `500`, no `TransferPosted` audit row, nothing for an operator to trace or retry against.
+
+1. **Scoped to the audit-trail gap only — no new call to IdentityApi.** The task file's own expectation, checked and confirmed before writing any code: `IIdentityApiClient` has exactly one outcome-reporting method, `RecordReversalOutcomeAsync` (T-020), and `IdentityApi`'s real `AuthorizationController` (read directly, read-only, no file in that repo touched) exposes exactly one matching route, `POST /v1/authorization/requests/{id}/reversal-outcome` — there is no transfer equivalent. This is expected, not an oversight: reversal outcome-reporting was a deliberate, separate T-020 addition tied to reversal's specific deferred-grant-verification machinery; a transfer never had that machinery to begin with (decision #47/D-6 is still deferred for both operations). So the fix adds no new cross-service contract — it closes the audit gap only, exactly as the task scoped it.
+2. **The 422-with-body business-rule-failure case was already correct and is untouched.** `LedgerApiClient.TransferAsync`'s own comment explains why: `LedgerApi`'s `TransfersController` maps a `TransactionStatus.Failed` result to HTTP 422 but still returns a normal `TransferResponse` body, read the same way as a 200 — this is the existing `transfer.Status == "Failed"` branch after the `try`/`catch`, never reaching the new `catch` block at all.
+3. **Audit row shape mirrors `ReversalService`'s catch-all exactly, adapted for the one missing piece: no LedgerApi reference exists yet on this path.** `ReversalService`'s own catch-all keys its `TransferPosted`-equivalent row by `request.OriginalTransactionReference` (known before the call, since a reversal targets an existing transaction) — a transfer has no such pre-existing reference; LedgerApi generates the reference only on a response this path never gets. Used `authorization.Decision.DecisionId` instead, the same id the `Approved`/`Denied` rows already key on, so the row is still traceable by an operator even without a LedgerApi reference. `Details` uses the identical `$"DecisionId {authorization.Decision.DecisionId}; LedgerApi failure: {ex.Message}"` shape the task file specified.
+4. **Tested by mirroring `ReversalServiceTests`' own test for this exact scenario** (`ReverseAsync_WhenLedgerApiFailsWithAnUnexpectedError_...`): `FakeLedgerApiClient.TransferHandler` throws a `DownstreamApiException`, the test asserts the same exception (service name, status code) still reaches the caller unmasked, and — querying `AuditLogs` directly via EF Core, not a call-count assertion — that exactly one `TransferPosted` row exists with `Status: "Unconfirmed"` and both the decision id and the original failure message in `Details`.
+
+See the PR description for the full test run and the LEARNING_LOG entry.
