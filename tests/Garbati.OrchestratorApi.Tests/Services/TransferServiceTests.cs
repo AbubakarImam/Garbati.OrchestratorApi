@@ -4,6 +4,7 @@ using Garbati.OrchestratorApi.Data;
 using Garbati.OrchestratorApi.Exceptions;
 using Garbati.OrchestratorApi.Services;
 using Garbati.OrchestratorApi.Tests.Fixtures;
+using Microsoft.EntityFrameworkCore;
 
 namespace Garbati.OrchestratorApi.Tests.Services;
 
@@ -122,5 +123,38 @@ public class TransferServiceTests(PostgresFixture fixture) : IAsyncLifetime
 
         Assert.Equal("Failed", result.Status);
         Assert.Equal("Insufficient funds.", result.FailureReason);
+    }
+
+    // T-036: mirrors ReversalServiceTests'
+    // "ReverseAsync_WhenLedgerApiFailsWithAnUnexpectedError_..." test for the same class of failure on the
+    // transfer path - a 500 (or any other unexpected exception, as opposed to the Status="Failed" body
+    // case above) from ledgerApiClient.TransferAsync, thrown after IdentityApi has already authorized the
+    // transfer. Before this fix nothing caught this at all: no audit row, a bare unhandled 500. Assert
+    // both halves QA asked for: the original exception still reaches the caller unmasked, and a
+    // TransferPosted audit row with Status="Unconfirmed" was actually written - queried from the audit
+    // table directly, not inferred from a call count.
+    [Fact]
+    public async Task TransferAsync_WhenLedgerApiThrowsUnexpectedly_StillWritesAnUnconfirmedAuditRow_ButRethrowsTheOriginalError()
+    {
+        await using var ctx = fixture.CreateContext();
+        var identity = new FakeIdentityApiClient();
+        var ledger = new FakeLedgerApiClient
+        {
+            TransferHandler = _ => throw new DownstreamApiException(
+                "LedgerApi", 500, "Internal server error."),
+        };
+        var service = CreateService(ctx, identity, ledger);
+
+        var ex = await Assert.ThrowsAsync<DownstreamApiException>(() => service.TransferAsync(NewRequest()));
+
+        Assert.Equal("LedgerApi", ex.ServiceName);
+        Assert.Equal(500, ex.StatusCode);
+        Assert.Equal(1, ledger.TransferCallCount);
+
+        var auditRow = await ctx.AuditLogs.SingleAsync(a => a.Action == "TransferPosted");
+        Assert.Equal("Unconfirmed", auditRow.Status);
+        Assert.StartsWith("DEC-FAKE", auditRow.EntityId);
+        Assert.Contains("LedgerApi failure", auditRow.Details);
+        Assert.Contains("Internal server error.", auditRow.Details);
     }
 }
