@@ -32,6 +32,12 @@ public class AccountOpening
     public string? CustomerId { get; set; }
     public string? LedgerAccountId { get; set; }
 
+    // T-046: set once the new BindProduct step succeeds; null before that (same pattern CustomerId/
+    // LedgerAccountId already use for the steps before it). See AccountOpeningService's own comment on
+    // DetermineProductCode for how this value is derived - a hardcoded demo-stub mapping, not a real
+    // product-catalog lookup.
+    public string? ProductCode { get; set; }
+
     public AccountOpeningStep CurrentStep { get; set; }
     public AccountOpeningStatus Status { get; set; }
     public string? FailureReason { get; set; }

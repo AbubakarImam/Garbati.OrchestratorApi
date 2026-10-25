@@ -24,7 +24,7 @@ public class OrchestratorDbContext(DbContextOptions<OrchestratorDbContext> optio
             entity.Property(a => a.CurrentStep).HasConversion<string>();
             entity.Property(a => a.Status).HasConversion<string>();
             entity.ToTable(t => t.HasCheckConstraint("ck_account_openings_current_step",
-                "\"current_step\" IN ('CreateCustomer', 'VerifyKyc', 'CreateLedgerAccount', 'AttachMandate', 'Complete')"));
+                "\"current_step\" IN ('CreateCustomer', 'VerifyKyc', 'CreateLedgerAccount', 'AttachMandate', 'BindProduct', 'Complete')"));
             entity.ToTable(t => t.HasCheckConstraint("ck_account_openings_status",
                 "\"status\" IN ('InProgress', 'Complete', 'Failed')"));
         });
