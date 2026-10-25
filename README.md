@@ -123,6 +123,8 @@ KEY="opk_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"; echo "$KEY"; pr
 
 Every request gets a correlation id (`X-Correlation-ID`), propagated to every downstream call this service makes to IdentityApi/LedgerApi so one operation's logs line up across all three services. Audit rows (`audit_logs`) are written in the same database transaction as the change they describe. The signed grant IdentityApi issues for a transfer is never logged, persisted or returned by this service — only its decision id.
 
+This is deliberately all GARBATI ships today — no metrics/tracing/alerting stack. See `garbati-platform`'s `OBSERVABILITY.md` for why, and what to reach for if you need more.
+
 ## Deployment
 
 The `Dockerfile` builds two images:
