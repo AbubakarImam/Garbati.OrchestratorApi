@@ -122,6 +122,14 @@ try
         client.DefaultRequestHeaders.Add(ApiKeyAuthenticationHandler.HeaderName, options.ApiKey);
     }).AddHttpMessageHandler<CorrelationIdPropagationHandler>();
 
+    // T-046: this service as a client of Garbati.ProductApi (the new BindProduct account-opening step).
+    builder.Services.AddHttpClient<IProductApiClient, ProductApiClient>((sp, client) =>
+    {
+        var options = sp.GetRequiredService<IOptions<DownstreamServicesOptions>>().Value.ProductApi;
+        client.BaseAddress = new Uri(options.BaseUrl);
+        client.DefaultRequestHeaders.Add(ApiKeyAuthenticationHandler.HeaderName, options.ApiKey);
+    }).AddHttpMessageHandler<CorrelationIdPropagationHandler>();
+
     var app = builder.Build();
 
     // First in the pipeline, so every later log line (including the request summary) has the id.

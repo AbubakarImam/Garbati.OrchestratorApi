@@ -16,6 +16,9 @@ public class DownstreamServicesOptions
 {
     public DownstreamServiceOptions IdentityApi { get; set; } = new();
     public DownstreamServiceOptions LedgerApi { get; set; } = new();
+
+    // T-046: this service as a client of Garbati.ProductApi (the new BindProduct account-opening step).
+    public DownstreamServiceOptions ProductApi { get; set; } = new();
 }
 
 // Runs at startup (ValidateOnStart): a missing base URL or key would otherwise surface only the first
@@ -28,6 +31,7 @@ public class DownstreamServicesOptionsValidator : IValidateOptions<DownstreamSer
 
         Check(options.IdentityApi, "DownstreamServices:IdentityApi", errors);
         Check(options.LedgerApi, "DownstreamServices:LedgerApi", errors);
+        Check(options.ProductApi, "DownstreamServices:ProductApi", errors);
 
         return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);
     }
