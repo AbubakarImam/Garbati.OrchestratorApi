@@ -8,5 +8,6 @@ public enum AccountOpeningStep
     VerifyKyc,
     CreateLedgerAccount,
     AttachMandate,
+    BindProduct,
     Complete,
 }

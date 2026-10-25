@@ -107,6 +107,10 @@ namespace Garbati.OrchestratorApi.Migrations
                         .HasColumnType("text")
                         .HasColumnName("phone_number");
 
+                    b.Property<string>("ProductCode")
+                        .HasColumnType("text")
+                        .HasColumnName("product_code");
+
                     b.Property<string>("RequestHash")
                         .IsRequired()
                         .HasColumnType("text")
@@ -132,7 +136,7 @@ namespace Garbati.OrchestratorApi.Migrations
 
                     b.ToTable("account_openings", null, t =>
                         {
-                            t.HasCheckConstraint("ck_account_openings_current_step", "\"current_step\" IN ('CreateCustomer', 'VerifyKyc', 'CreateLedgerAccount', 'AttachMandate', 'Complete')");
+                            t.HasCheckConstraint("ck_account_openings_current_step", "\"current_step\" IN ('CreateCustomer', 'VerifyKyc', 'CreateLedgerAccount', 'AttachMandate', 'BindProduct', 'Complete')");
 
                             t.HasCheckConstraint("ck_account_openings_status", "\"status\" IN ('InProgress', 'Complete', 'Failed')");
                         });

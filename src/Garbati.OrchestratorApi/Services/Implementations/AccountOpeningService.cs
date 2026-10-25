@@ -5,6 +5,7 @@ using Garbati.OrchestratorApi.Auditing;
 using Garbati.OrchestratorApi.Authorization;
 using Garbati.OrchestratorApi.Clients.Contracts.Identity;
 using Garbati.OrchestratorApi.Clients.Contracts.Ledger;
+using Garbati.OrchestratorApi.Clients.Contracts.Product;
 using Garbati.OrchestratorApi.Clients.Interfaces;
 using Garbati.OrchestratorApi.Contracts.Requests;
 using Garbati.OrchestratorApi.Contracts.Responses;
@@ -16,15 +17,18 @@ using Npgsql;
 
 namespace Garbati.OrchestratorApi.Services;
 
-// DESIGN.md Section 1.3/1.4/1.11, task file Section 1. Runs the 4-step account-opening sequence
-// synchronously in one call, tracking progress in the AccountOpenings table so a retry resumes from
-// CurrentStep rather than redoing steps that already succeeded.
+// DESIGN.md Section 1.3/1.4/1.11, task file Section 1. Runs the 5-step account-opening sequence (T-046
+// added BindProduct, closing the gap ARCHITECTURE.md Section 10 always named but this service never
+// built, since ProductApi didn't exist until T-045) synchronously in one call, tracking progress in the
+// AccountOpenings table so a retry resumes from CurrentStep rather than redoing steps that already
+// succeeded.
 public class AccountOpeningService(
     OrchestratorDbContext dbContext,
     IAuditLogger auditLogger,
     ICurrentClient currentClient,
     IIdentityApiClient identityApiClient,
-    ILedgerApiClient ledgerApiClient) : IAccountOpeningService
+    ILedgerApiClient ledgerApiClient,
+    IProductApiClient productApiClient) : IAccountOpeningService
 {
     private const int MaxOperationIdGenerationAttempts = 5;
 
@@ -47,6 +51,26 @@ public class AccountOpeningService(
     private const string DemoKycTier = "Tier2";
     private const string DemoKycVerificationType = "DemoStub";
     private const string DemoKycProvider = "OrchestratorDemoStub-NotRealVerification";
+
+    // T-046, task file Section 2: a hardcoded, clearly-labeled demo stub decision - not a real
+    // product-catalog lookup, in the same spirit as DemoKycTier/DemoKycVerificationType above.
+    // StartAccountOpeningRequest.AccountType is a free-text field ("Savings"/"Current" in every real
+    // caller today, confirmed against CreateCustomer's own test fixtures - not a fixed enum anywhere in
+    // this codebase), so this derives the ProductCode to bind as "{JurisdictionCode}-{SAV|CUR}-STD",
+    // matching Garbati.ProductApi's own seeded placeholder products (NG-SAV-STD/NG-CUR-STD, per its
+    // SeedPlaceholderProductLimitPolicies migration). A real deployment would need a real way for a
+    // caller to choose or be assigned a product - that is future work, not this one.
+    //
+    // This also means an account-opening request for any JurisdictionCode other than "NG" will fail at
+    // this step today (only NG-SAV-STD/NG-CUR-STD are seeded on the ProductApi side) - that is the
+    // correct failure mode (a clear, recorded Failed status with a plain reason via NoProductMappingException
+    // below), not a bug to work around here.
+    private static string DetermineProductCode(AccountOpening opening) => opening.AccountType switch
+    {
+        "Savings" => $"{opening.JurisdictionCode}-SAV-STD",
+        "Current" => $"{opening.JurisdictionCode}-CUR-STD",
+        _ => throw new NoProductMappingException($"No product mapping exists for AccountType '{opening.AccountType}'."),
+    };
 
     // Fingerprint of the fields that define the operation being started, so a reused idempotency key with
     // a different body is detected (same scheme as LedgerApi's AccountService/IdentityApi's
@@ -72,7 +96,8 @@ public class AccountOpeningService(
         opening.LedgerAccountId,
         opening.FailureReason,
         opening.CreatedAt,
-        opening.CompletedAt);
+        opening.CompletedAt,
+        opening.ProductCode);
 
     public async Task<AccountOpeningResponse> StartAsync(StartAccountOpeningRequest request, CancellationToken cancellationToken = default)
     {
@@ -171,7 +196,7 @@ public class AccountOpeningService(
     // DESIGN.md Section 1.4: "re-runs the sequence from CurrentStep onward ... every downstream call uses
     // a derived, deterministic idempotency key ... so a step that already succeeded is a safe no-op if
     // accidentally re-invoked." Each `if` below falls through to the next once its step's CurrentStep is
-    // advanced, so a fresh Start runs steps 1-4 in one pass; a retry starting mid-sequence only enters the
+    // advanced, so a fresh Start runs steps 1-5 in one pass; a retry starting mid-sequence only enters the
     // blocks at or after the stored CurrentStep - the skipped blocks are never reached, which is what the
     // task file's "verify with a call-count assertion" tests check.
     private async Task<AccountOpeningResponse> RunFromCurrentStepAsync(AccountOpening opening, CancellationToken cancellationToken)
@@ -239,8 +264,20 @@ public class AccountOpeningService(
                     // Already attached by an earlier attempt at this same step (Exceptions/
                     // MandateAlreadyAttachedException.cs) - treated as success on retry, not re-thrown.
                 }
-                opening.CurrentStep = AccountOpeningStep.Complete;
+                opening.CurrentStep = AccountOpeningStep.BindProduct;
                 await SaveStepProgressAsync(opening, "AttachMandate succeeded", cancellationToken);
+            }
+
+            if (opening.CurrentStep == AccountOpeningStep.BindProduct)
+            {
+                var productCode = DetermineProductCode(opening);
+                var binding = await productApiClient.BindAccountToProductAsync(
+                    new BindAccountToProductRequest(
+                        $"orch:{opening.OperationId}:bind-product", opening.LedgerAccountId!, productCode),
+                    cancellationToken);
+                opening.ProductCode = binding.ProductCode;
+                opening.CurrentStep = AccountOpeningStep.Complete;
+                await SaveStepProgressAsync(opening, "BindProduct succeeded", cancellationToken);
             }
 
             opening.Status = AccountOpeningStatus.Complete;
