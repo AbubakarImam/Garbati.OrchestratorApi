@@ -19,6 +19,16 @@ public class MigrationTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task AppliedMigrations_IncludeAddProductCodeToAccountOpenings()
+    {
+        await using var ctx = fixture.CreateContext();
+
+        var applied = await ctx.Database.GetAppliedMigrationsAsync();
+
+        Assert.Contains(applied, m => m.EndsWith("AddProductCodeToAccountOpenings"));
+    }
+
+    [Fact]
     public async Task AccountOpeningsTable_ExistsWithItsExpectedColumns()
     {
         await using var ctx = fixture.CreateContext();
@@ -27,7 +37,7 @@ public class MigrationTests(PostgresFixture fixture)
             "id", "operation_id", "idempotency_key", "initiated_by", "request_hash",
             "full_name", "jurisdiction_code", "customer_reference", "email", "phone_number",
             "account_name", "account_type", "currency_code",
-            "customer_id", "ledger_account_id", "current_step", "status", "failure_reason",
+            "customer_id", "ledger_account_id", "product_code", "current_step", "status", "failure_reason",
             "created_at", "completed_at");
 
         await AssertColumnsAsync(ctx, "audit_logs",

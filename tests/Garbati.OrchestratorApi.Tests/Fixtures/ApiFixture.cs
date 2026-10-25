@@ -15,12 +15,13 @@ namespace Garbati.OrchestratorApi.Tests.Fixtures;
 // Runs the real app in memory (WebApplicationFactory) against its own Postgres container, so requests go
 // through the full pipeline: correlation id, authentication, authorization, controllers and the database.
 //
-// IIdentityApiClient/ILedgerApiClient are replaced with FakeIdentityApiClient/FakeLedgerApiClient here
-// (task file's judgment call: this service is tested against mocked/stubbed HTTP clients, not real
-// locally-run IdentityApi/LedgerApi instances - see the PR description for the reasoning and what that
-// means this suite cannot verify). DownstreamServices:* configuration is still filled with syntactically
-// valid placeholder values below purely so DownstreamServicesOptionsValidator's ValidateOnStart passes -
-// those values are never actually dialled.
+// IIdentityApiClient/ILedgerApiClient/IProductApiClient are replaced with FakeIdentityApiClient/
+// FakeLedgerApiClient/FakeProductApiClient here (task file's judgment call: this service is tested
+// against mocked/stubbed HTTP clients, not real locally-run IdentityApi/LedgerApi/ProductApi instances -
+// see the PR description for the reasoning and what that means this suite cannot verify).
+// DownstreamServices:* configuration is still filled with syntactically valid placeholder values below
+// purely so DownstreamServicesOptionsValidator's ValidateOnStart passes - those values are never
+// actually dialled.
 public class ApiFixture : IAsyncLifetime
 {
     private readonly PostgreSqlContainer _container = new PostgreSqlBuilder("postgres:16-alpine").Build();
@@ -28,6 +29,7 @@ public class ApiFixture : IAsyncLifetime
     public WebApplicationFactory<Program> Factory { get; private set; } = null!;
     public FakeIdentityApiClient IdentityApiClient { get; } = new();
     public FakeLedgerApiClient LedgerApiClient { get; } = new();
+    public FakeProductApiClient ProductApiClient { get; } = new();
 
     // For every scope there is a client holding only that scope, and one holding every scope except it.
     public static string OnlyClient(string scope) => $"only-{scope}";
@@ -51,6 +53,8 @@ public class ApiFixture : IAsyncLifetime
             ["DownstreamServices:IdentityApi:ApiKey"] = "unused-placeholder",
             ["DownstreamServices:LedgerApi:BaseUrl"] = "http://unused.invalid",
             ["DownstreamServices:LedgerApi:ApiKey"] = "unused-placeholder",
+            ["DownstreamServices:ProductApi:BaseUrl"] = "http://unused.invalid",
+            ["DownstreamServices:ProductApi:ApiKey"] = "unused-placeholder",
         };
 
         var clients = OrchestratorScopes.All
@@ -81,6 +85,8 @@ public class ApiFixture : IAsyncLifetime
                 services.AddSingleton<IIdentityApiClient>(IdentityApiClient);
                 services.RemoveAll<ILedgerApiClient>();
                 services.AddSingleton<ILedgerApiClient>(LedgerApiClient);
+                services.RemoveAll<IProductApiClient>();
+                services.AddSingleton<IProductApiClient>(ProductApiClient);
             });
         });
     }

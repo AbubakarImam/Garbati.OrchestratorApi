@@ -1,4 +1,5 @@
 using Garbati.OrchestratorApi.Clients.Contracts.Identity;
+using Garbati.OrchestratorApi.Clients.Contracts.Product;
 using Garbati.OrchestratorApi.Contracts.Requests;
 using Garbati.OrchestratorApi.Data;
 using Garbati.OrchestratorApi.Exceptions;
@@ -18,8 +19,8 @@ public class AccountOpeningServiceTests(PostgresFixture fixture) : IAsyncLifetim
     public Task DisposeAsync() => Task.CompletedTask;
 
     private static AccountOpeningService CreateService(
-        OrchestratorDbContext ctx, FakeIdentityApiClient identity, FakeLedgerApiClient ledger) =>
-        new(ctx, TestAudit.For(ctx), TestCaller.Default, identity, ledger);
+        OrchestratorDbContext ctx, FakeIdentityApiClient identity, FakeLedgerApiClient ledger, FakeProductApiClient? product = null) =>
+        new(ctx, TestAudit.For(ctx), TestCaller.Default, identity, ledger, product ?? new FakeProductApiClient());
 
     private static StartAccountOpeningRequest NewRequest(string idempotencyKey) => new(
         idempotencyKey, "Ada Lovelace", "NG", CustomerReference: null,
@@ -27,12 +28,13 @@ public class AccountOpeningServiceTests(PostgresFixture fixture) : IAsyncLifetim
         AccountName: "Ada Savings", AccountType: "Savings", CurrencyCode: "NGN");
 
     [Fact]
-    public async Task StartAsync_HappyPath_RunsAllFourSteps_AndCompletes()
+    public async Task StartAsync_HappyPath_RunsAllFiveSteps_AndCompletes()
     {
         await using var ctx = fixture.CreateContext();
         var identity = new FakeIdentityApiClient();
         var ledger = new FakeLedgerApiClient();
-        var service = CreateService(ctx, identity, ledger);
+        var product = new FakeProductApiClient();
+        var service = CreateService(ctx, identity, ledger, product);
 
         var response = await service.StartAsync(NewRequest(Guid.NewGuid().ToString()));
 
@@ -40,6 +42,7 @@ public class AccountOpeningServiceTests(PostgresFixture fixture) : IAsyncLifetim
         Assert.Equal("Complete", response.CurrentStep);
         Assert.NotNull(response.CustomerId);
         Assert.NotNull(response.LedgerAccountId);
+        Assert.Equal("NG-SAV-STD", response.ProductCode);
         Assert.Null(response.FailureReason);
         Assert.NotNull(response.CompletedAt);
 
@@ -47,6 +50,32 @@ public class AccountOpeningServiceTests(PostgresFixture fixture) : IAsyncLifetim
         Assert.Equal(1, identity.RecordKycDecisionCallCount);
         Assert.Equal(1, ledger.CreateAccountCallCount);
         Assert.Equal(1, identity.AttachMandateCallCount);
+        Assert.Equal(1, product.BindAccountToProductCallCount);
+    }
+
+    // T-046 task file's test list: "a fake/mock IProductApiClient recorded exactly one call with the
+    // expected AccountNumber/ProductCode/idempotency key."
+    [Fact]
+    public async Task StartAsync_BindsProduct_WithTheExpectedAccountNumberProductCodeAndIdempotencyKey()
+    {
+        BindAccountToProductRequest? captured = null;
+        var product = new FakeProductApiClient
+        {
+            BindAccountToProductHandler = r =>
+            {
+                captured = r;
+                return new AccountProductBindingResponse(r.AccountNumber, r.ProductCode, DateTimeOffset.UtcNow);
+            },
+        };
+        await using var ctx = fixture.CreateContext();
+        var service = CreateService(ctx, new FakeIdentityApiClient(), new FakeLedgerApiClient(), product);
+
+        var response = await service.StartAsync(NewRequest(Guid.NewGuid().ToString()));
+
+        Assert.NotNull(captured);
+        Assert.Equal(response.LedgerAccountId, captured!.AccountNumber);
+        Assert.Equal("NG-SAV-STD", captured.ProductCode);
+        Assert.Equal($"orch:{response.Id}:bind-product", captured.IdempotencyKey);
     }
 
     // T-025 regression: the demo KYC stub must assign a tier that IdentityApi's own tier-policy data
@@ -150,15 +179,16 @@ public class AccountOpeningServiceTests(PostgresFixture fixture) : IAsyncLifetim
     }
 
     [Fact]
-    public async Task StartAsync_WhenAttachMandateFails_StatusIsFailedAtThatStep()
+    public async Task StartAsync_WhenAttachMandateFails_StatusIsFailedAtThatStep_AndProductApiIsNeverCalled()
     {
         var identity = new FakeIdentityApiClient
         {
             AttachMandateHandler = (_, _) => throw new DownstreamApiException("IdentityApi", 500, "mandate boom"),
         };
         var ledger = new FakeLedgerApiClient();
+        var product = new FakeProductApiClient();
         await using var ctx = fixture.CreateContext();
-        var service = CreateService(ctx, identity, ledger);
+        var service = CreateService(ctx, identity, ledger, product);
 
         var response = await service.StartAsync(NewRequest(Guid.NewGuid().ToString()));
 
@@ -166,12 +196,62 @@ public class AccountOpeningServiceTests(PostgresFixture fixture) : IAsyncLifetim
         Assert.Equal("AttachMandate", response.CurrentStep);
         Assert.NotNull(response.CustomerId);
         Assert.NotNull(response.LedgerAccountId);
+        Assert.Null(response.ProductCode);
         Assert.Contains("mandate boom", response.FailureReason);
 
         Assert.Equal(1, identity.CreateCustomerCallCount);
         Assert.Equal(1, identity.RecordKycDecisionCallCount);
         Assert.Equal(1, ledger.CreateAccountCallCount);
         Assert.Equal(1, identity.AttachMandateCallCount);
+        Assert.Equal(0, product.BindAccountToProductCallCount);
+    }
+
+    // T-046 task file's test list: "BindProduct step failure ... leaves CurrentStep == BindProduct,
+    // Status == Failed, a clear FailureReason."
+    [Fact]
+    public async Task StartAsync_WhenBindProductFails_StatusIsFailedAtThatStep()
+    {
+        var identity = new FakeIdentityApiClient();
+        var ledger = new FakeLedgerApiClient();
+        var product = new FakeProductApiClient
+        {
+            BindAccountToProductHandler = _ => throw new DownstreamApiException("ProductApi", 500, "product boom"),
+        };
+        await using var ctx = fixture.CreateContext();
+        var service = CreateService(ctx, identity, ledger, product);
+
+        var response = await service.StartAsync(NewRequest(Guid.NewGuid().ToString()));
+
+        Assert.Equal("Failed", response.Status);
+        Assert.Equal("BindProduct", response.CurrentStep);
+        Assert.NotNull(response.CustomerId);
+        Assert.NotNull(response.LedgerAccountId);
+        Assert.Null(response.ProductCode);
+        Assert.Contains("product boom", response.FailureReason);
+
+        Assert.Equal(1, identity.AttachMandateCallCount);
+        Assert.Equal(1, product.BindAccountToProductCallCount);
+    }
+
+    // T-046 task file's test list: "An AccountType with no mapping ... fails clearly at this step with
+    // the specific exception message, not a generic/confusing error."
+    [Fact]
+    public async Task StartAsync_WhenAccountTypeHasNoProductMapping_FailsClearly_AndProductApiIsNeverCalled()
+    {
+        var identity = new FakeIdentityApiClient();
+        var ledger = new FakeLedgerApiClient();
+        var product = new FakeProductApiClient();
+        await using var ctx = fixture.CreateContext();
+        var service = CreateService(ctx, identity, ledger, product);
+        var request = NewRequest(Guid.NewGuid().ToString()) with { AccountType = "Joint" };
+
+        var response = await service.StartAsync(request);
+
+        Assert.Equal("Failed", response.Status);
+        Assert.Equal("BindProduct", response.CurrentStep);
+        Assert.Equal("No product mapping exists for AccountType 'Joint'.", response.FailureReason);
+        Assert.Null(response.ProductCode);
+        Assert.Equal(0, product.BindAccountToProductCallCount);
     }
 
     [Fact]
@@ -207,13 +287,53 @@ public class AccountOpeningServiceTests(PostgresFixture fixture) : IAsyncLifetim
         Assert.Equal(1, identity.AttachMandateCallCount);
     }
 
+    // T-046 task file's test list: "a subsequent retry resumes from BindProduct, not from CreateCustomer
+    // (mirror the existing step-failure/retry tests already in this test file for the other three steps
+    // exactly)."
+    [Fact]
+    public async Task RetryAsync_AfterBindProductFailure_ResumesFromBindProduct_WithoutRecallingEarlierSteps()
+    {
+        await using var ctx = fixture.CreateContext();
+        var identity = new FakeIdentityApiClient();
+        var ledger = new FakeLedgerApiClient();
+        var product = new FakeProductApiClient
+        {
+            BindAccountToProductHandler = _ => throw new DownstreamApiException("ProductApi", 500, "product down"),
+        };
+        var service = CreateService(ctx, identity, ledger, product);
+
+        var failed = await service.StartAsync(NewRequest(Guid.NewGuid().ToString()));
+        Assert.Equal("Failed", failed.Status);
+        Assert.Equal("BindProduct", failed.CurrentStep);
+        Assert.Equal(1, identity.CreateCustomerCallCount);
+        Assert.Equal(1, ledger.CreateAccountCallCount);
+        Assert.Equal(1, identity.AttachMandateCallCount);
+        Assert.Equal(1, product.BindAccountToProductCallCount);
+
+        product.BindAccountToProductHandler = null; // ProductApi recovers
+
+        var retried = await service.RetryAsync(failed.Id);
+
+        Assert.Equal("Complete", retried.Status);
+        Assert.Equal(failed.Id, retried.Id);
+        Assert.Equal("NG-SAV-STD", retried.ProductCode);
+        // Steps 1-4 are NOT re-called - the call-count assertion the task file specifically asks for.
+        Assert.Equal(1, identity.CreateCustomerCallCount);
+        Assert.Equal(1, identity.RecordKycDecisionCallCount);
+        Assert.Equal(1, ledger.CreateAccountCallCount);
+        Assert.Equal(1, identity.AttachMandateCallCount);
+        // Step 5 (the one that failed) is retried.
+        Assert.Equal(2, product.BindAccountToProductCallCount);
+    }
+
     [Fact]
     public async Task RetryAsync_WhenAlreadyComplete_IsANoOp_AndDoesNotCallDownstreamAgain()
     {
         await using var ctx = fixture.CreateContext();
         var identity = new FakeIdentityApiClient();
         var ledger = new FakeLedgerApiClient();
-        var service = CreateService(ctx, identity, ledger);
+        var product = new FakeProductApiClient();
+        var service = CreateService(ctx, identity, ledger, product);
 
         var completed = await service.StartAsync(NewRequest(Guid.NewGuid().ToString()));
         Assert.Equal("Complete", completed.Status);
@@ -226,6 +346,7 @@ public class AccountOpeningServiceTests(PostgresFixture fixture) : IAsyncLifetim
         Assert.Equal(1, identity.RecordKycDecisionCallCount);
         Assert.Equal(1, ledger.CreateAccountCallCount);
         Assert.Equal(1, identity.AttachMandateCallCount);
+        Assert.Equal(1, product.BindAccountToProductCallCount);
     }
 
     [Fact]
