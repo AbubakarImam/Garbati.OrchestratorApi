@@ -1,7 +1,7 @@
 # Garbati.OrchestratorApi — Design Document (v1, minimal)
 
-**Status:** Design v1 (minimal) — ratified and **built** (`garbati-platform` T-022, `feat/foundation`, 18 October 2026 — see Appendix A for build notes and judgment calls). Reversal (Section 1.5a) added by T-030, 19 October 2026 — see Appendix C. Transfer-side LedgerApi-failure audit gap (1.5, 1.11) closed by T-036, 21 October 2026 — see Appendix D. Account-opening's fifth step, BindProduct, added by T-046, 25 October 2026, now that `Garbati.ProductApi` exists (T-045) — see Appendix E.
-**Last updated:** 25 October 2026
+**Status:** Design v1 (minimal) — ratified and **built** (`garbati-platform` T-022, `feat/foundation`, 18 October 2026 — see Appendix A for build notes and judgment calls). Reversal (Section 1.5a) added by T-030, 19 October 2026 — see Appendix C. Transfer-side LedgerApi-failure audit gap (1.5, 1.11) closed by T-036, 21 October 2026 — see Appendix D. Account-opening's fifth step, BindProduct, added by T-046, 25 October 2026, now that `Garbati.ProductApi` exists (T-045) — see Appendix E. Decision #11 (forward `DecisionId` to LedgerApi) built by T-065, 3 November 2026 — see Appendix F.
+**Last updated:** 3 November 2026
 **Service name:** `OrchestratorApi` (`Garbati.OrchestratorApi`)
 **Platform:** Garbati — see [`garbati-platform/ARCHITECTURE.md`](https://github.com/AbubakarImam/garbati-platform/blob/main/ARCHITECTURE.md) Sections 2–4 and 10 for the platform-wide flows this document implements a minimal slice of; this document never repeats that file, only this service's detail.
 **Decision history:** `garbati-platform/TASKS.md` D-1 (demo scope, revised 16 Oct 2026), D-6 (token-verification timing), D-10 (hosting, still open), D-14 (reversal endpoint, owner-approved 19 Oct 2026).
@@ -65,7 +65,9 @@ Caller (Swagger, standing in for a real Channel — see 1.6)
        - IdentityApi issues a signed grant if authorized
        - Orchestrator may verify the grant itself as defence in depth (DESIGN.md 3.4)
        - calls LedgerApi: POST /api/transfers (ordinary single transfer, no fee/tax legs)
-           (the grant is NOT yet forwarded into this call — see 1.7, D-6)
+           (the grant is NOT yet forwarded into this call — see 1.7, D-6; the authorization
+            decision id IS forwarded, as the new DecisionId field — decision #11, T-065, a
+            separate, opaque identifier, not the grant/credential itself)
            - a business-rule failure (e.g. insufficient funds) comes back as a normal body,
              Status: "Failed" — handled below, not an exception
            - anything else the call throws (404/409/500, a timeout, any other unexpected
@@ -196,7 +198,7 @@ One audit row per operation-level event: account-opening step started/completed/
 | 8 | Reversal in this version | Call LedgerApi's reversal with no IdentityApi check; omit reversal entirely | **Confirmed (D-1, revised 16 Oct 2026): omit entirely**, until `garbati-platform` T-015 defines reversal authority. **Superseded by T-030 (D-14, 19 Oct 2026): built, mirroring 1.5 (see 1.5a), now that T-015/T-020/T-021 have defined that authority.** |
 | 9 | Repository/deployment shape | Own repo now, merge into one deployable with ProductApi later; design as if already merged | **Settled, 28 Oct 2026 (`garbati-platform` D-10, closed as superseded):** stays its own repo/deployable, permanently, not just "for now." Both services are live on Azure as separate App Services; the cost concern that motivated "merge later" is already solved a cheaper way — T-048 found all 6 live services share one App Service Plan regardless of how many separate sites/codebases they are, so an additional site costs nothing extra on top of that. Merging now would mean real retroactive engineering risk (one DI container, one Swagger doc, one CI pipeline, re-pointing every caller) on two already-shipped services, to save a cost that isn't actually being paid. Staying separate keeps real fault isolation and independent deploy/scale. |
 | 10 | ProductCode to bind for the new BindProduct step (T-046) | A real product-selection mechanism (caller chooses, or is assigned, a product); a hardcoded placeholder mapping from the existing free-text `AccountType` field | **Confirmed, deliberately narrow (owner's decision, 25 Oct 2026):** hardcoded `{JurisdictionCode}-{SAV\|CUR}-STD` derived from `AccountType` ("Savings"/"Current" only - anything else fails clearly, `NoProductMappingException`), matching `Garbati.ProductApi`'s own seeded placeholder products. Same "demo stub, clearly labeled, not a real catalog lookup" spirit as decision #6's `DemoKycTier`. A real product-selection mechanism is future work. This also means today only `JurisdictionCode = "NG"` can ever reach `Complete` (only `NG-SAV-STD`/`NG-CUR-STD` are seeded) - the correct failure mode for any other jurisdiction, not a bug. |
-| 11 | Forward `AuthorizationDecision.DecisionId` to LedgerApi (`garbati-platform` D-31, T-063, LedgerApi decision #52) | Leave it as today (received from IdentityApi, used only in this service's own audit log) vs forward it into the transfer call | **Confirmed, design stage, 3 Nov 2026:** `TransferService` already receives `authorization.Decision.DecisionId` from `Garbati.IdentityApi` on every call - this adds it to the existing `TransferRequest` payload sent to LedgerApi, which stores it as an opaque `decision_id` column. No new call, no new data this service doesn't already have; closes LedgerApi's own named-actor-traceability gap (T-058 Gap 6) without this service, or LedgerApi, ever handling or storing a human name. **Scope correction (confirmed directly against the real code, T-065): `ReversalService` is untouched by this decision** - it calls LedgerApi's `ReversalRequest(OriginalTransactionReference, Reason)`, a narrower contract with no field for this and no new one added; a reversal references an existing transaction, it does not post a new `TransferRequest`/`ChainRequest` for this to attach to. |
+| 11 | Forward `AuthorizationDecision.DecisionId` to LedgerApi (`garbati-platform` D-31, T-063, LedgerApi decision #52) | Leave it as today (received from IdentityApi, used only in this service's own audit log) vs forward it into the transfer call | **Confirmed, built by T-065, 3 Nov 2026 (see Appendix F):** `TransferService` already receives `authorization.Decision.DecisionId` from `Garbati.IdentityApi` on every call - this adds it to the existing `TransferRequest` payload sent to LedgerApi, which stores it as an opaque `decision_id` column. No new call, no new data this service doesn't already have; closes LedgerApi's own named-actor-traceability gap (T-058 Gap 6) without this service, or LedgerApi, ever handling or storing a human name. **Scope correction (confirmed directly against the real code, T-065): `ReversalService` is untouched by this decision** - it calls LedgerApi's `ReversalRequest(OriginalTransactionReference, Reason)`, a narrower contract with no field for this and no new one added; a reversal references an existing transaction, it does not post a new `TransferRequest`/`ChainRequest` for this to attach to. |
 
 ---
 
@@ -285,5 +287,40 @@ Built Section 1.3's fifth step in one task, on `feature/bind-product-step`, now 
 6. **Also not independently verified: whether `Garbati.ProductApi`'s own `Products` catalog table actually has rows for `NG-SAV-STD`/`NG-CUR-STD` seeded anywhere.** Reading its migrations directly: `SeedPlaceholderProductLimitPolicies` seeds the `ProductLimitPolicy` table only; no migration seeds the `Products` table itself (that table is populated only via `POST /v1/products`, `ProductsController`). `AccountProductBindingService.CreateAsync` 404s (`ProductNotFoundException`) if the `Products` row doesn't exist, independent of whether a `ProductLimitPolicy` row does. This is a `Garbati.ProductApi`-side operational gap (or an intentional "the caller must create the product first" expectation) outside this task's repo boundary - flagged, not fixed, here; a real local smoke test of this flow needs those two `Products` rows created first.
 7. **Migration (`AddProductCodeToAccountOpenings`) is purely additive**, matching the task file's own framing: a nullable `product_code` column (every existing row gets `NULL`) plus extending the existing `ck_account_openings_current_step` check constraint to include `'BindProduct'`. No human-only-gate concern - the same "add a nullable column" shape every other migration on this platform has already used.
 8. **Tested** by mirroring the existing per-step failure/retry pattern in `AccountOpeningServiceTests` exactly (happy path now asserts 5 real downstream calls plus `ProductCode` on the response; a `BindProduct` failure leaves `CurrentStep == BindProduct` and a subsequent retry only re-calls `IProductApiClient`, not the four earlier steps; an unmapped `AccountType` fails with the exact `NoProductMappingException` message and never calls `IProductApiClient` at all), a new `ProductApiClientTests` mirroring `LedgerApiClientTests` against `Garbati.ProductApi`'s real response shapes, and a new `DownstreamServicesOptionsValidatorTests` covering all three downstream entries (none existed as a dedicated file before this task). See the PR description for the full test run.
+
+See the PR description for the full test run and the LEARNING_LOG entry.
+
+---
+
+## Appendix F. T-065 build notes (forward `DecisionId` to LedgerApi, decision #11)
+
+Built decision #11 in one task, on `feature/t-065-forward-decision-id`, now that T-064 (LedgerApi's half,
+merged to its `main` same day) gave `LedgerApi.Contracts.Requests.TransferRequest` a `decision_id` field to
+send. Confirmed before starting that T-064 was actually merged (read directly from LedgerApi's git log, not
+assumed).
+
+1. **One call site, one new field — exactly as scoped.** `TransferService.TransferAsync`'s existing call to
+   `ledgerApiClient.TransferAsync` already had `authorization.Decision.DecisionId` in scope (used a few
+   lines below in both audit rows); this task adds it as the new, trailing `DecisionId` argument to
+   `LedgerDto.TransferRequest`.
+2. **`Clients/Contracts/Ledger/TransferRequest.cs` (this service's own mirror of LedgerApi's real contract)
+   adds only `DecisionId`, not `ValueDate`/`BranchCode`/`Channel`.** Read LedgerApi's real, just-built
+   `TransferRequest` directly (`LedgerApi/src/LedgerApi/Contracts/Requests/TransferRequest.cs`) to match
+   the new field's name and type exactly (`string? DecisionId = null`) rather than guess it - its three
+   siblings have no real caller on this side yet by design (decision #11's own scope note), and this task
+   does not become that caller.
+3. **`ReversalService`/`ReversalRequest.cs` confirmed untouched**, exactly as decision #11's scope
+   correction already specified before this task started: LedgerApi's reversal endpoint takes
+   `ReversalRequest(OriginalTransactionReference, Reason)`, a narrower contract with no field for this and
+   none being added - a reversal references an existing transaction, it doesn't post a new
+   `TransferRequest`.
+4. **No deviation from what decision #11 already said** - the decision text (confirmed, design stage,
+   3 Nov 2026) matched the real code exactly once read against it; this build just executes it. Updated
+   only the decision's status line (from "design stage" to "built") and this appendix, not its substance.
+5. **Tested by mirroring the existing capture-via-handler pattern**
+   (`TransferAsync_SendsDebitAsTheOperationToIdentityApi`, one call upstream): a new
+   `TransferAsync_ForwardsTheRealDecisionIdToLedgerApi` test captures the actual `LedgerDto.TransferRequest`
+   sent via `FakeLedgerApiClient.TransferHandler` and asserts its `DecisionId` equals the same decision id
+   returned to the caller (`result.DecisionId`), rather than inferring forwarding from a call count alone.
 
 See the PR description for the full test run and the LEARNING_LOG entry.

@@ -107,6 +107,34 @@ public class TransferServiceTests(PostgresFixture fixture) : IAsyncLifetime
         Assert.Equal("Debit", capturedRequest!.Operation);
     }
 
+    // T-065/decision #11: TransferService already receives authorization.Decision.DecisionId from
+    // IdentityApi on every call (used in the audit rows the tests above don't directly inspect) - this
+    // asserts it is also forwarded into LedgerApi's own TransferRequest, not just kept local to this
+    // service's audit log. Mirrors TransferAsync_SendsDebitAsTheOperationToIdentityApi's
+    // capture-via-handler shape, one call downstream.
+    [Fact]
+    public async Task TransferAsync_ForwardsTheRealDecisionIdToLedgerApi()
+    {
+        Garbati.OrchestratorApi.Clients.Contracts.Ledger.TransferRequest? capturedRequest = null;
+        var identity = new FakeIdentityApiClient();
+        var ledger = new FakeLedgerApiClient
+        {
+            TransferHandler = r =>
+            {
+                capturedRequest = r;
+                return new Garbati.OrchestratorApi.Clients.Contracts.Ledger.TransferResponse("TXN-FAKE00000001", "Success");
+            },
+        };
+        await using var ctx = fixture.CreateContext();
+        var service = CreateService(ctx, identity, ledger);
+
+        var result = await service.TransferAsync(NewRequest());
+
+        Assert.NotNull(capturedRequest);
+        Assert.StartsWith("DEC-FAKE", capturedRequest!.DecisionId);
+        Assert.Equal(result.DecisionId, capturedRequest.DecisionId);
+    }
+
     [Fact]
     public async Task TransferAsync_WhenLedgerApiReportsAFailedLeg_ReturnsTheFailureReason()
     {

@@ -72,12 +72,17 @@ public class TransferService(
         // not independently re-verify it either (see the PR description for that judgment call).
         // `authorization.Grant` is read by IdentityApiClient and never touches this method at all - it is
         // simply never referenced, so it cannot leak into a log line or a response by accident.
+        // DecisionId (decision #11, T-065) IS forwarded, separately from the grant: it's an opaque
+        // identifier already used in this method's own audit rows below, not a credential, and LedgerApi
+        // now has a decision_id column to store it in (T-064) - it closes LedgerApi's named-actor-
+        // traceability gap without this service, or LedgerApi, ever handling or storing a human name.
         LedgerDto.TransferResponse transfer;
         try
         {
             transfer = await ledgerApiClient.TransferAsync(
                 new LedgerDto.TransferRequest(
-                    request.DebitAccountId, request.CreditAccountId, request.Amount, request.Narration, request.IdempotencyKey),
+                    request.DebitAccountId, request.CreditAccountId, request.Amount, request.Narration,
+                    request.IdempotencyKey, authorization.Decision.DecisionId),
                 cancellationToken);
         }
         catch (Exception ex)
